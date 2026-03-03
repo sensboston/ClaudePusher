@@ -1,0 +1,9 @@
+{
+  "tg_token": "123456789:AAxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+  "chat_id": "123456789",
+  "poll_interval_ms": 5000,
+  "question_interval_hours": 4,
+  "window_title": "Claude Code",
+  "idle_threshold_minutes": 3,
+  "encoding": "CP1251  Cyrillic"
+}
