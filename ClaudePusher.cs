@@ -47,25 +47,62 @@ class ClaudePusher
 
     [DllImport("user32.dll")] static extern bool EnumWindows(EnumWindowsProc cb, IntPtr lp);
     [DllImport("user32.dll")] static extern int  GetWindowText(IntPtr hWnd, StringBuilder sb, int max);
+    [DllImport("user32.dll")] static extern int  GetClassName(IntPtr hWnd, StringBuilder lpClassName, int nMaxCount);
     [DllImport("user32.dll")] static extern bool IsWindowVisible(IntPtr hWnd);
-    [DllImport("user32.dll")] static extern bool PostMessage(IntPtr hWnd, uint msg, IntPtr wp, IntPtr lp);
     [DllImport("user32.dll")] static extern bool SetForegroundWindow(IntPtr hWnd);
     [DllImport("user32.dll")] static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
     [DllImport("user32.dll")] static extern bool GetLastInputInfo(ref LASTINPUTINFO plii);
+    [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint lpdwProcessId);
     [DllImport("kernel32.dll")] static extern bool AllocConsole();
     [DllImport("kernel32.dll")] static extern bool FreeConsole();
+    [DllImport("kernel32.dll")] static extern bool AttachConsole(uint dwProcessId);
+    [DllImport("kernel32.dll", CharSet = CharSet.Auto, SetLastError = true)]
+    static extern IntPtr CreateFile(string lpFileName, uint dwDesiredAccess, uint dwShareMode,
+        IntPtr lpSecurityAttributes, uint dwCreationDisposition, uint dwFlagsAndAttributes, IntPtr hTemplateFile);
+    [DllImport("kernel32.dll", SetLastError = true, EntryPoint = "WriteConsoleInputW")]
+    static extern bool WriteConsoleInput(IntPtr hConsoleInput,
+        INPUT_RECORD[] lpBuffer, uint nLength, out uint lpNumberOfEventsWritten);
+    [DllImport("kernel32.dll")] static extern bool CloseHandle(IntPtr hObject);
     [DllImport("shcore.dll")]   static extern int  SetProcessDpiAwareness(int value);
     [DllImport("user32.dll")]   static extern uint GetDpiForSystem();
+    [DllImport("user32.dll")]   static extern bool OpenClipboard(IntPtr hWndNewOwner);
+    [DllImport("user32.dll")]   static extern bool CloseClipboard();
+    [DllImport("user32.dll")]   static extern IntPtr GetClipboardData(uint uFormat);
+    [DllImport("kernel32.dll")] static extern IntPtr GlobalLock(IntPtr hMem);
+    [DllImport("kernel32.dll")] static extern bool   GlobalUnlock(IntPtr hMem);
+    [DllImport("kernel32.dll")] static extern UIntPtr GlobalSize(IntPtr hMem);
+    [DllImport("user32.dll")]   static extern bool AddClipboardFormatListener(IntPtr hwnd);
+    [DllImport("user32.dll")]   static extern bool IsClipboardFormatAvailable(uint format);
+
+    const uint CF_BITMAP       = 2;
+    const uint CF_DIB          = 8;
+    const uint CF_DIBV5        = 17;
+    const int  WM_CLIPBOARDUPDATE = 0x031D;
 
     delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lp);
 
     [StructLayout(LayoutKind.Sequential)]
     struct LASTINPUTINFO { public uint cbSize; public uint dwTime; }
 
-    const uint WM_CHAR    = 0x0102;
-    const uint WM_KEYDOWN = 0x0100;
-    const uint WM_KEYUP   = 0x0101;
-    const int  SW_RESTORE = 9;
+    // INPUT_RECORD for WriteConsoleInput (KEY_EVENT_RECORD inlined with Explicit layout)
+    [StructLayout(LayoutKind.Explicit)]
+    struct INPUT_RECORD
+    {
+        [FieldOffset(0)]  public ushort EventType;
+        [FieldOffset(4)]  public int    bKeyDown;
+        [FieldOffset(8)]  public ushort wRepeatCount;
+        [FieldOffset(10)] public ushort wVirtualKeyCode;
+        [FieldOffset(12)] public ushort wVirtualScanCode;
+        [FieldOffset(14)] public ushort UnicodeChar;
+        [FieldOffset(16)] public uint   dwControlKeyState;
+    }
+
+    const ushort KEY_EVENT        = 0x0001;
+    const ushort VK_RETURN        = 0x000D;
+    const uint   GENERIC_WRITE    = 0x40000000;
+    const uint   FILE_SHARE_RW    = 0x00000003;
+    const uint   OPEN_EXISTING    = 3;
+    const int    SW_RESTORE       = 9;
 
     #endregion
 
@@ -89,10 +126,38 @@ class ClaudePusher
     };
     static Mutex      instanceMutex;
 
+    static volatile bool hasImageInClipboard = false;
+
     static readonly JavaScriptSerializer json            = new JavaScriptSerializer();
     static readonly object               winLock         = new object();
     static readonly object               injectLock      = new object();
     static readonly HashSet<IntPtr>      disabledWindows = new HashSet<IntPtr>();
+
+    // Window list cache — refreshed every 3 s in background so tray menu opens instantly
+    static volatile List<KeyValuePair<IntPtr, string>> cachedWindows =
+        new List<KeyValuePair<IntPtr, string>>();
+
+    #endregion
+
+    #region Clipboard listener form
+
+    // Subclass Form to catch WM_CLIPBOARDUPDATE without a separate NativeWindow
+    class ClipboardListenerForm : Form
+    {
+        protected override void WndProc(ref Message m)
+        {
+            if (m.Msg == WM_CLIPBOARDUPDATE)
+                UpdateClipboardFlag();
+            base.WndProc(ref m);
+        }
+    }
+
+    static void UpdateClipboardFlag()
+    {
+        hasImageInClipboard = IsClipboardFormatAvailable(CF_BITMAP)
+                           || IsClipboardFormatAvailable(CF_DIB)
+                           || IsClipboardFormatAvailable(CF_DIBV5);
+    }
 
     #endregion
 
@@ -143,11 +208,13 @@ class ClaudePusher
             return;
         }
 
-        // Hidden form acts as the message pump for the tray icon
-        uiForm = new Form { ShowInTaskbar = false, WindowState = FormWindowState.Minimized };
+        // Hidden form acts as the message pump for the tray icon and clipboard notifications
+        uiForm = new ClipboardListenerForm { ShowInTaskbar = false, WindowState = FormWindowState.Minimized };
         uiForm.Load += (s, e) =>
         {
             uiForm.Hide();
+            AddClipboardFormatListener(uiForm.Handle);
+            UpdateClipboardFlag();
             ServicePointManager.SecurityProtocol = SecurityProtocolType.Tls12;
 
             tray = new NotifyIcon
@@ -169,6 +236,7 @@ class ClaudePusher
             new Thread(PollLoop)        { IsBackground = true }.Start();
             new Thread(QuestionLoop)    { IsBackground = true }.Start();
             new Thread(IdleMonitorLoop) { IsBackground = true }.Start();
+            new Thread(WindowCacheLoop) { IsBackground = true }.Start();
         };
 
         Application.Run(uiForm);
@@ -302,7 +370,7 @@ class ClaudePusher
         menu.MenuItems.Add(autoItem);
         menu.MenuItems.Add("-");
 
-        var windows = FindClaudeWindows();
+        var windows = cachedWindows;
         if (windows.Count == 0)
         {
             menu.MenuItems.Add(new MenuItem("(no Claude Code windows)") { Enabled = false });
@@ -332,6 +400,12 @@ class ClaudePusher
 
         menu.MenuItems.Add("-");
 
+        var pasteItem = new MenuItem("Send Screenshot") { Enabled = hasImageInClipboard };
+        pasteItem.Click += (s, e) => PasteImageFromClipboard();
+        menu.MenuItems.Add(pasteItem);
+
+        menu.MenuItems.Add("-");
+
         // Encoding submenu with radio checkmarks
         var encMenu = new MenuItem("Encoding");
         foreach (string enc in encodings)
@@ -342,6 +416,17 @@ class ClaudePusher
             encMenu.MenuItems.Add(encItem);
         }
         menu.MenuItems.Add(encMenu);
+
+        // Inactivity time submenu (3..10 minutes)
+        var idleMenu = new MenuItem("Inactivity time");
+        for (int m = 3; m <= 10; m++)
+        {
+            int mins = m;
+            var idleItem = new MenuItem(mins + " min") { RadioCheck = true, Checked = (idleThreshold == mins) };
+            idleItem.Click += (s, e) => { idleThreshold = mins; SaveIdleThreshold(); };
+            idleMenu.MenuItems.Add(idleItem);
+        }
+        menu.MenuItems.Add(idleMenu);
 
         menu.MenuItems.Add("-");
         menu.MenuItems.Add(new MenuItem("Exit", (s, e) =>
@@ -414,6 +499,21 @@ class ClaudePusher
     #region Encoding persistence
 
     /// <summary>
+    /// Persists the idle threshold to <c>config.json</c>.
+    /// </summary>
+    static void SaveIdleThreshold()
+    {
+        try
+        {
+            var cfg = json.Deserialize<Dictionary<string, object>>(
+                File.ReadAllText(configFile, Encoding.UTF8));
+            cfg["idle_threshold_minutes"] = idleThreshold;
+            File.WriteAllText(configFile, json.Serialize(cfg), Encoding.UTF8);
+        }
+        catch { }
+    }
+
+    /// <summary>
     /// Persists the currently selected encoding to <c>config.json</c>.
     /// </summary>
     static void SaveEncoding()
@@ -443,6 +543,15 @@ class ClaudePusher
         EnumWindows((hWnd, lp) =>
         {
             if (!IsWindowVisible(hWnd)) return true;
+            // Only console windows (ConsoleWindowClass = classic conhost,
+            // CASCADIA_HOSTING_WINDOW_CLASS = Windows Terminal).
+            // This filters out browsers, editors, etc. that happen to have
+            // "claude" in their title (e.g. Chrome with a GitHub tab open).
+            var cls = new StringBuilder(64);
+            GetClassName(hWnd, cls, 64);
+            string className = cls.ToString();
+            if (className != "ConsoleWindowClass" && className != "CASCADIA_HOSTING_WINDOW_CLASS")
+                return true;
             var sb = new StringBuilder(256);
             GetWindowText(hWnd, sb, 256);
             string title = sb.ToString();
@@ -578,6 +687,23 @@ class ClaudePusher
                 }
             }
             catch { }
+        }
+    }
+
+    #endregion
+
+    #region Window cache
+
+    /// <summary>
+    /// Background loop: refreshes the Claude window list every 3 seconds so that
+    /// <see cref="RebuildTrayMenu"/> can read it instantly without blocking the UI thread.
+    /// </summary>
+    static void WindowCacheLoop()
+    {
+        while (true)
+        {
+            try { cachedWindows = FindClaudeWindows(); } catch { }
+            Thread.Sleep(3000);
         }
     }
 
@@ -783,6 +909,53 @@ class ClaudePusher
     #region Keyboard injection
 
     /// <summary>
+    /// Replaces common emoji with readable ASCII/CP1251-safe equivalents.
+    /// </summary>
+    static string EmojiToText(string text)
+    {
+        var map = new Dictionary<string, string>
+        {
+            // Hands / gestures
+            { "👍", "(y)" },   { "👎", "(n)" },   { "👏", "(clap)" },
+            { "🙌", "(y)(y)" },{ "🤝", "(ok)" },  { "👌", "OK" },    { "🆗", "OK" },   { "✌", "(v)" },
+            { "☝", "(^)" },    { "👉", "(->)" },  { "👈", "(<-)" },
+            { "🤞", "(x)" },   { "💪", "(strong)" },
+            // Smileys
+            { "😀", ":D" },    { "😁", ":D" },    { "😂", ":D)" },
+            { "🤣", "XD" },    { "😊", ":)" },    { "🙂", ":)" },
+            { "😉", ";)" },    { "😍", ":*" },    { "🥰", ":*" },
+            { "😎", "B)" },    { "🤔", "hmm" },   { "😐", ":|" },
+            { "😑", ":|" },    { "😒", ":/"},     { "😢", ":(" },
+            { "😭", ":'(" },   { "😤", ">:(" },   { "😠", ">:(" },
+            { "😡", ">:(" },   { "🤯", "O_O" },   { "😱", ":O" },
+            { "😴", "zzz" },   { "🤢", "blergh" },{ "😷", "(mask)" },
+            { "🙄", "=_=" },   { "😏", ";)" },    { "🫠", ":/" },
+            // Hearts / symbols
+            { "❤", "<3" },     { "❤️", "<3" },    { "🧡", "<3" },
+            { "💛", "<3" },    { "💚", "<3" },    { "💙", "<3" },
+            { "💜", "<3" },    { "💔", "</3" },   { "💯", "100%" },
+            { "🔥", "fire" },  { "✨", "*" },     { "⭐", "*" },
+            { "🌟", "*" },     { "💡", "(idea)" },{ "🎉", "(yay)" },
+            { "🎊", "(yay)" }, { "🎁", "(gift)" },{ "🏆", "(win)" },
+            { "✅", "[+]" },   { "❌", "[-]" },   { "⚠", "[!]" },
+            { "ℹ", "[i]" },    { "❓", "?" },     { "❗", "!" },
+            { "⁉", "!?" },    { "‼", "!!" },
+            // Misc
+            { "👀", "(eyes)" },{ "🙈", "(nope)" },{ "🤦", "(facepalm)" },
+            { "🤷", "shrug" }, { "💀", "(dead)" },{ "☠", "(dead)" },
+            { "🫡", "(aye)" }, { "🫤", "meh" },   { "🫣", "(peek)" },
+            // Seasonal / misc
+            { "🎃", "(pumpkin)" }, { "🎄", "(xmas)" }, { "🎆", "(fireworks)" },
+            { "🌈", "(rainbow)" }, { "🌙", "(moon)" }, { "☀", "(sun)" },
+            { "❄", "(snow)" },    { "🌊", "(wave)" }, { "🍕", "(pizza)" },
+            { "🍺", "(beer)" },   { "☕", "(coffee)" },
+        };
+        foreach (var kv in map)
+            text = text.Replace(kv.Key, kv.Value);
+        return text;
+    }
+
+    /// <summary>
     /// Injects a text string followed by Enter into all enabled Claude Code windows.
     /// </summary>
     /// <param name="text">The text to inject.</param>
@@ -790,7 +963,7 @@ class ClaudePusher
     {
         lock (injectLock)
         {
-            foreach (var pair in FindClaudeWindows())
+            foreach (var pair in cachedWindows)
             {
                 bool disabled;
                 lock (winLock) disabled = disabledWindows.Contains(pair.Key);
@@ -800,37 +973,166 @@ class ClaudePusher
     }
 
     /// <summary>
-    /// Posts each character of <paramref name="text"/> as a WM_CHAR message to the target window,
-    /// then sends a Return keystroke (WM_KEYDOWN/WM_KEYUP with VK_RETURN).
-    /// Uses CP1251 encoding so Cyrillic characters are received correctly by mintty.
+    /// Injects text into the Claude Code console by writing directly to the console input buffer
+    /// via WriteConsoleInput with Unicode code points in KEY_EVENT_RECORD.UnicodeChar.
+    /// This correctly handles Cyrillic and any other Unicode characters regardless of the
+    /// console code page or terminal mode.
     /// </summary>
     /// <param name="hwnd">Target window handle.</param>
-    /// <param name="text">Text to post.</param>
+    /// <param name="text">Text to inject.</param>
     static void PostText(IntPtr hwnd, string text)
     {
         try
         {
-            // Pre-clear: send Enter to dismiss any stuck prompt line
-            PostMessage(hwnd, WM_KEYDOWN, new IntPtr(0x0D), new IntPtr(0x001C0001));
-            Thread.Sleep(20);
-            PostMessage(hwnd, WM_KEYUP,   new IntPtr(0x0D), new IntPtr(0xC01C0001));
-            Thread.Sleep(150);
+            uint pid;
+            GetWindowThreadProcessId(hwnd, out pid);
 
-            // WM_CHAR expects ANSI byte values; extract codepage number from e.g. "CP1251 (Cyrillic)"
-            int cp = 1251;
-            var m = System.Text.RegularExpressions.Regex.Match(encoding, @"CP(\d+)");
-            if (m.Success) int.TryParse(m.Groups[1].Value, out cp);
-            foreach (byte b in Encoding.GetEncoding(cp).GetBytes(text))
+            FreeConsole();
+            if (!AttachConsole(pid)) return;
+
+            IntPtr hConIn = CreateFile("CONIN$", GENERIC_WRITE, FILE_SHARE_RW,
+                IntPtr.Zero, OPEN_EXISTING, 0, IntPtr.Zero);
+            if (hConIn == new IntPtr(-1)) { FreeConsole(); return; }
+
+            try
             {
-                PostMessage(hwnd, WM_CHAR, new IntPtr(b), new IntPtr(1));
-                Thread.Sleep(10);
+                // Pre-clear: Enter to dismiss any stuck prompt line
+                WriteKey(hConIn, '\r', VK_RETURN);
+                Thread.Sleep(150);
+
+                foreach (char c in EmojiToText(text))
+                {
+                    WriteKey(hConIn, c, 0);
+                    Thread.Sleep(10);
+                }
+
+                Thread.Sleep(50);
+                WriteKey(hConIn, '\r', VK_RETURN);
             }
-            Thread.Sleep(50);
-            PostMessage(hwnd, WM_KEYDOWN, new IntPtr(0x0D), new IntPtr(0x001C0001));
-            Thread.Sleep(20);
-            PostMessage(hwnd, WM_KEYUP,   new IntPtr(0x0D), new IntPtr(0xC01C0001));
+            finally
+            {
+                CloseHandle(hConIn);
+                FreeConsole();
+            }
         }
         catch { }
+    }
+
+    /// <summary>
+    /// Writes a single key-down + key-up pair to the console input buffer.
+    /// </summary>
+    static void WriteKey(IntPtr hConIn, char c, ushort vk)
+    {
+        var recs = new INPUT_RECORD[2];
+        for (int i = 0; i < 2; i++)
+        {
+            recs[i].EventType         = KEY_EVENT;
+            recs[i].bKeyDown          = (i == 0) ? 1 : 0;
+            recs[i].wRepeatCount      = 1;
+            recs[i].wVirtualKeyCode   = vk;
+            recs[i].wVirtualScanCode  = 0;
+            recs[i].UnicodeChar       = (ushort)c;
+            recs[i].dwControlKeyState = 0;
+        }
+        uint written;
+        WriteConsoleInput(hConIn, recs, 2, out written);
+    }
+
+    #endregion
+
+    #region Clipboard image
+
+    // Build a valid BMP byte array from raw DIB data (CF_DIB format, no BITMAPFILEHEADER).
+    static Bitmap BitmapFromDib(byte[] dib)
+    {
+        int infoSize   = BitConverter.ToInt32(dib, 0);   // BITMAPINFOHEADER.biSize (usually 40)
+        short bitCount = BitConverter.ToInt16(dib, 14);  // biBitCount
+        int compression= BitConverter.ToInt32(dib, 16);  // biCompression
+
+        int paletteSize;
+        if      (bitCount <= 8)    paletteSize = (1 << bitCount) * 4;
+        else if (compression == 3) paletteSize = 12; // BI_BITFIELDS: 3 color masks
+        else                       paletteSize = 0;
+
+        int pixelOffset = 14 + infoSize + paletteSize;
+        int fileSize    = 14 + dib.Length;
+
+        byte[] bmp = new byte[fileSize];
+        bmp[0] = (byte)'B'; bmp[1] = (byte)'M';
+        Array.Copy(BitConverter.GetBytes(fileSize),    0, bmp, 2,  4);
+        Array.Copy(BitConverter.GetBytes(pixelOffset), 0, bmp, 10, 4);
+        Array.Copy(dib, 0, bmp, 14, dib.Length);
+
+        using (var ms = new MemoryStream(bmp))
+        using (var tmp = new Bitmap(ms))
+            return new Bitmap(tmp); // clone so the bitmap is independent of the stream
+    }
+
+    static void PasteImageFromClipboard()
+    {
+        try
+        {
+            Image img = null;
+
+            // Attempt 1: standard WinForms API
+            try { img = Clipboard.GetImage(); } catch { }
+
+            // Attempt 2: CF_DIB via WinForms DataObject → fix missing BITMAPFILEHEADER
+            if (img == null)
+            {
+                try
+                {
+                    var dataObj = Clipboard.GetDataObject();
+                    if (dataObj != null && dataObj.GetDataPresent(DataFormats.Dib))
+                    {
+                        var ms = dataObj.GetData(DataFormats.Dib) as MemoryStream;
+                        if (ms != null) img = BitmapFromDib(ms.ToArray());
+                    }
+                }
+                catch { }
+            }
+
+            // Attempt 3: raw CF_DIB via P/Invoke (most reliable for PrtScr)
+            if (img == null)
+            {
+                bool opened = OpenClipboard(IntPtr.Zero);
+                if (opened)
+                {
+                    try
+                    {
+                        IntPtr hDib = GetClipboardData(CF_DIB);
+                        if (hDib != IntPtr.Zero)
+                        {
+                            IntPtr ptr = GlobalLock(hDib);
+                            if (ptr != IntPtr.Zero)
+                            {
+                                try
+                                {
+                                    int size = (int)GlobalSize(hDib).ToUInt64();
+                                    byte[] dib = new byte[size];
+                                    Marshal.Copy(ptr, dib, 0, size);
+                                    img = BitmapFromDib(dib);
+                                }
+                                finally { GlobalUnlock(hDib); }
+                            }
+                        }
+                    }
+                    finally { CloseClipboard(); }
+                }
+            }
+
+            if (img == null) return;
+
+            string dir  = Path.Combine(appDir, "inbox_media");
+            Directory.CreateDirectory(dir);
+            string path = Path.Combine(dir, DateTime.Now.ToString("yyyyMMdd_HHmmss") + ".png");
+            img.Save(path, System.Drawing.Imaging.ImageFormat.Png);
+            InjectToClaude("[photo: " + path + "]");
+        }
+        catch (Exception ex)
+        {
+            InjectToClaude("[ClaudePusher] Screenshot error: " + ex.Message);
+        }
     }
 
     #endregion
