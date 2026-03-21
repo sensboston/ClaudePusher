@@ -21,8 +21,8 @@ using System.Web.Script.Serialization;
 using System.Windows.Forms;
 using Microsoft.Win32;
 
-[assembly: System.Reflection.AssemblyVersion("1.2.0.0")]
-[assembly: System.Reflection.AssemblyFileVersion("1.2.0.0")]
+[assembly: System.Reflection.AssemblyVersion("1.3.0.0")]
+[assembly: System.Reflection.AssemblyFileVersion("1.3.0.0")]
 [assembly: System.Reflection.AssemblyProduct("ClaudePusher")]
 [assembly: System.Reflection.AssemblyDescription("Inject Telegram notifications into Claude Code CLI")]
 [assembly: System.Reflection.AssemblyCopyright("(c) 2026 sensboston")]
@@ -53,6 +53,28 @@ class ClaudePusher
     [DllImport("user32.dll")] static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
     [DllImport("user32.dll")] static extern bool GetLastInputInfo(ref LASTINPUTINFO plii);
     [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint lpdwProcessId);
+    [DllImport("kernel32.dll")] static extern IntPtr CreateToolhelp32Snapshot(uint dwFlags, uint th32ProcessID);
+    [DllImport("kernel32.dll")] static extern bool   Process32First(IntPtr hSnapshot, ref PROCESSENTRY32 lppe);
+    [DllImport("kernel32.dll")] static extern bool   Process32Next (IntPtr hSnapshot, ref PROCESSENTRY32 lppe);
+
+    const uint TH32CS_SNAPPROCESS = 0x00000002;
+
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Auto)]
+    struct PROCESSENTRY32
+    {
+        public uint  dwSize;
+        public uint  cntUsage;
+        public uint  th32ProcessID;
+        public IntPtr th32DefaultHeapID;
+        public uint  th32ModuleID;
+        public uint  cntThreads;
+        public uint  th32ParentProcessID;
+        public int   pcPriClassBase;
+        public uint  dwFlags;
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 260)]
+        public string szExeFile;
+    }
+
     [DllImport("kernel32.dll")] static extern bool AllocConsole();
     [DllImport("kernel32.dll")] static extern bool FreeConsole();
     [DllImport("kernel32.dll")] static extern bool AttachConsole(uint dwProcessId);
@@ -359,7 +381,7 @@ class ClaudePusher
             using (var f  = new Font("Segoe UI", 9f, FontStyle.Bold, GraphicsUnit.Point))
             using (var b  = new SolidBrush(Color.White))
             using (var sf = new StringFormat { LineAlignment = StringAlignment.Center })
-                e.Graphics.DrawString("ClaudePusher  v1.2", f, b,
+                e.Graphics.DrawString("ClaudePusher  v1.3", f, b,
                     new RectangleF(8f, 0f, r.Width - 16f, r.Height), sf);
         };
         menu.MenuItems.Add(header);
@@ -537,26 +559,68 @@ class ClaudePusher
     /// <see cref="windowTitle"/> (case-insensitive).
     /// </summary>
     /// <returns>List of (HWND, title) pairs for matching windows.</returns>
+    /// <summary>
+    /// Returns a map of PID -> parentPID for all running processes via Toolhelp32 snapshot.
+    /// </summary>
+    static Dictionary<uint, uint> GetParentPidMap()
+    {
+        var map = new Dictionary<uint, uint>();
+        IntPtr snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+        if (snap == new IntPtr(-1)) return map;
+        try
+        {
+            var entry = new PROCESSENTRY32 { dwSize = (uint)Marshal.SizeOf(typeof(PROCESSENTRY32)) };
+            if (Process32First(snap, ref entry))
+                do { map[entry.th32ProcessID] = entry.th32ParentProcessID; }
+                while (Process32Next(snap, ref entry));
+        }
+        finally { CloseHandle(snap); }
+        return map;
+    }
+
     static List<KeyValuePair<IntPtr, string>> FindClaudeWindows()
     {
+        // Build a set of PIDs for all running claude.exe processes
+        var claudePids = new HashSet<uint>();
+        foreach (var p in Process.GetProcessesByName("claude"))
+            claudePids.Add((uint)p.Id);
+
         var result = new List<KeyValuePair<IntPtr, string>>();
+        if (claudePids.Count == 0) return result;
+
+        // Build parent map: claude may run inside cmd/powershell — the console window
+        // belongs to the parent process, not to claude.exe itself.
+        // Collect all ancestor PIDs of every claude.exe instance.
+        var parentMap = GetParentPidMap();
+        var hostPids  = new HashSet<uint>(claudePids);
+        foreach (uint cpid in claudePids)
+        {
+            uint cur = cpid;
+            for (int depth = 0; depth < 5; depth++)
+            {
+                uint parent;
+                if (!parentMap.TryGetValue(cur, out parent) || parent == 0) break;
+                hostPids.Add(parent);
+                cur = parent;
+            }
+        }
+
         EnumWindows((hWnd, lp) =>
         {
             if (!IsWindowVisible(hWnd)) return true;
             // Only console windows (ConsoleWindowClass = classic conhost,
             // CASCADIA_HOSTING_WINDOW_CLASS = Windows Terminal).
-            // This filters out browsers, editors, etc. that happen to have
-            // "claude" in their title (e.g. Chrome with a GitHub tab open).
             var cls = new StringBuilder(64);
             GetClassName(hWnd, cls, 64);
             string className = cls.ToString();
             if (className != "ConsoleWindowClass" && className != "CASCADIA_HOSTING_WINDOW_CLASS")
                 return true;
+            uint pid;
+            GetWindowThreadProcessId(hWnd, out pid);
+            if (!hostPids.Contains(pid)) return true;
             var sb = new StringBuilder(256);
             GetWindowText(hWnd, sb, 256);
-            string title = sb.ToString();
-            if (title.IndexOf(windowTitle, StringComparison.OrdinalIgnoreCase) >= 0)
-                result.Add(new KeyValuePair<IntPtr, string>(hWnd, title));
+            result.Add(new KeyValuePair<IntPtr, string>(hWnd, sb.ToString()));
             return true;
         }, IntPtr.Zero);
         return result;
