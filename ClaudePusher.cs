@@ -1077,13 +1077,13 @@ static class ClaudePusher
         {
             StartMic();
             UpdateTrayText(GetTrayText());
-            new Thread(() => InjectToClaude("[VP] микрофон включён")) { IsBackground = true }.Start();
+            new Thread(() => InjectToClaude("[VP] mic on")) { IsBackground = true }.Start();
         }
         else
         {
             StopMic();
             UpdateTrayText(GetTrayText());
-            new Thread(() => InjectToClaude("[VP] микрофон выключен")) { IsBackground = true }.Start();
+            new Thread(() => InjectToClaude("[VP] mic off")) { IsBackground = true }.Start();
         }
     }
 
@@ -1458,7 +1458,7 @@ static class ClaudePusher
                                 }
                                 else if (t.Equals("resume", StringComparison.OrdinalIgnoreCase))
                                 {
-                                    if (!micActive) { micActive = true; StartMic(); UpdateTrayText(GetTrayText()); new Thread(() => Speak("Включил.")) { IsBackground = true }.Start(); }
+                                    if (!micActive) { micActive = true; StartMic(); UpdateTrayText(GetTrayText()); new Thread(() => Speak("Mic on.")) { IsBackground = true }.Start(); }
                                 }
                                 else
                                 {
