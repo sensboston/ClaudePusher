@@ -38,17 +38,16 @@ using MP3Sharp;
 
 class SettingsForm : Form
 {
-    // General
-    ComboBox      cbEncoding;
-    NumericUpDown nudIdle;
-    CheckBox      chkAutoStart, chkTelegram, chkVoice;
+    const int LBL_W  = 110;
+    const int CTRL_X = 128;
 
-    // Telegram
-    TextBox       tbToken, tbChatId;
-
-    // Voice
-    TextBox       tbApiKey, tbSttModel, tbLanguage, tbTtsVoice, tbLogFile;
-    NumericUpDown nudRms, nudSilSec, nudMinAudio;
+    ComboBox cbEncoding;
+    TrackBar trkIdle, trkRms, trkSilSec;
+    Label    lblIdleVal, lblRmsVal, lblSilSecVal;
+    CheckBox chkAutoStart, chkVoice, chkShowKey;
+    TextBox  tbToken, tbChatId;
+    TextBox  tbApiKey, tbSttModel, tbTtsVoice;
+    Label    lblKeyStatus;
 
     public SettingsForm()
     {
@@ -59,119 +58,126 @@ class SettingsForm : Form
         FormBorderStyle = FormBorderStyle.FixedDialog;
         MaximizeBox     = MinimizeBox = false;
         StartPosition   = FormStartPosition.CenterScreen;
-        ClientSize      = new Size(490, 430);
 
-        float dpiScale;
-        using (var g = Graphics.FromHwnd(IntPtr.Zero))
-            dpiScale = g.DpiX / 96f;
-
-        var tabBg = SystemColors.Control;
+        const int TAB_W = 564;
         var tabs = new TabControl
         {
-            Left      = 8,    Top    = 8,
-            Width     = 474,  Height = 375,
+            Left = 0, Top = 0, Width = TAB_W,
             SizeMode  = TabSizeMode.Fixed,
-            ItemSize  = new Size((int)(100 * dpiScale), (int)(26 * dpiScale)),
-            DrawMode  = TabDrawMode.OwnerDrawFixed
+            ItemSize  = new Size(TAB_W / 6, 26),
+            DrawMode  = TabDrawMode.OwnerDrawFixed,
         };
         tabs.DrawItem += (s, e) =>
         {
-            var tc      = (TabControl)s;
-            bool sel    = (e.Index == tc.SelectedIndex);
-            var  bgCol  = sel ? tabBg : SystemColors.ControlDark;
-            var  fgCol  = sel ? SystemColors.ControlText : SystemColors.ControlLightLight;
-            using (var bg = new SolidBrush(bgCol))
-                e.Graphics.FillRectangle(bg, e.Bounds);
-            var r = e.Bounds;
-            // For selected tab, extend fill downward by 2px to hide the bottom border line
-            if (sel)
-            {
-                var ext = new Rectangle(r.Left + 1, r.Bottom - 2, r.Width - 2, 3);
-                using (var bg = new SolidBrush(tabBg))
-                    e.Graphics.FillRectangle(bg, ext);
-            }
-            TextRenderer.DrawText(e.Graphics, tc.TabPages[e.Index].Text,
-                sel ? new Font(tc.Font, FontStyle.Bold) : tc.Font,
-                r, fgCol,
-                TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter);
+            var tc  = (TabControl)s;
+            bool sel = e.Index == tc.SelectedIndex;
+            Color bg = sel ? SystemColors.Control : Color.FromArgb(110, 110, 110);
+            Color fg = sel ? Color.Black : Color.White;
+            using (var br = new SolidBrush(bg)) e.Graphics.FillRectangle(br, e.Bounds);
+            string text  = tc.TabPages[e.Index].Text;
+            Font   font  = sel ? new Font(tc.Font, FontStyle.Bold) : tc.Font;
+            SizeF  sz    = e.Graphics.MeasureString(text, font);
+            using (var fr = new SolidBrush(fg))
+                e.Graphics.DrawString(text, font, fr,
+                    e.Bounds.X + (e.Bounds.Width  - sz.Width)  / 2f,
+                    e.Bounds.Y + (e.Bounds.Height - sz.Height) / 2f);
         };
 
-        // ── General tab ──────────────────────────────────────────────────────
-        var tabG = new TabPage("General") { BackColor = tabBg };
-        int y = 16;
+        // ── Tab: General ─────────────────────────────────────────────────────
+        var tpG = new TabPage("General");
+        int y = 28;
 
         cbEncoding = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList };
         foreach (var enc in ClaudePusher.Encodings) cbEncoding.Items.Add(enc);
         cbEncoding.SelectedItem = ClaudePusher.encoding;
         if (cbEncoding.SelectedIndex < 0) cbEncoding.SelectedIndex = 0;
-        y = AddRow(tabG, y, "Encoding:", cbEncoding, 260);
+        y = AddRow(tpG, y, "Encoding:", cbEncoding, 280);
 
-        nudIdle = new NumericUpDown { Minimum = 1, Maximum = 60, Value = ClaudePusher.idleThreshold };
-        y = AddRow(tabG, y, "Inactivity alert (min):", nudIdle, 80);
+        int idleVal = Math.Max(3, Math.Min(30, ClaudePusher.idleThreshold));
+        trkIdle    = new TrackBar { Minimum = 3, Maximum = 30, Value = idleVal, TickFrequency = 3, SmallChange = 1, Left = CTRL_X, Top = y, Width = 340 };
+        lblIdleVal = new Label   { Text = idleVal + " min", Left = CTRL_X + 344, Top = y + 3, Width = 60 };
+        trkIdle.ValueChanged += (s, e) => lblIdleVal.Text = trkIdle.Value + " min";
+        tpG.Controls.AddRange(new Control[] { new Label { Text = "Inactivity alert:", Left = 12, Top = y + 3, Width = LBL_W }, trkIdle, lblIdleVal });
+        y += 42;
 
         chkAutoStart = new CheckBox { Text = "Start with Windows", Checked = ClaudePusher.GetAutoStart(), Left = 12, Top = y, AutoSize = true };
-        tabG.Controls.Add(chkAutoStart); y += 28;
+        tpG.Controls.Add(chkAutoStart); y += 28;
 
-        chkTelegram = new CheckBox { Text = "Enable Telegram module", Checked = ClaudePusher.enableTelegram, Left = 12, Top = y, AutoSize = true };
-        tabG.Controls.Add(chkTelegram); y += 28;
+        bool hasKey = !string.IsNullOrEmpty(ClaudePusher.voiceApiKey);
+        chkVoice = new CheckBox { Text = "Enable Voice", Checked = ClaudePusher.enableVoice && hasKey, Enabled = hasKey, Left = 12, Top = y, AutoSize = true };
+        tpG.Controls.Add(chkVoice); y += 28;
 
-        chkVoice = new CheckBox { Text = "Enable Voice module (STT + TTS)", Checked = ClaudePusher.enableVoice, Left = 12, Top = y, AutoSize = true };
-        tabG.Controls.Add(chkVoice); y += 30;
+        tpG.BackColor = SystemColors.Control;
+        tabs.TabPages.Add(tpG);
 
-        var note = new Label { Text = "Module changes take effect after restart.", Left = 12, Top = y, AutoSize = true, ForeColor = SystemColors.GrayText };
-        tabG.Controls.Add(note);
-
-        // ── Telegram tab ─────────────────────────────────────────────────────
-        var tabT = new TabPage("Telegram") { BackColor = tabBg };
-        y = 16;
+        // ── Tab: Telegram ────────────────────────────────────────────────────
+        var tpT = new TabPage("Telegram");
+        y = 28;
         tbToken  = new TextBox { Text = ClaudePusher.tgToken };
-        y = AddRow(tabT, y, "Bot token:", tbToken, 270);
-
         tbChatId = new TextBox { Text = ClaudePusher.chatId };
-        y = AddRow(tabT, y, "Chat ID:", tbChatId, 270);
+        y = AddRow(tpT, y, "Bot token:", tbToken,  400);
+        y = AddRow(tpT, y, "Chat ID:",   tbChatId, 150);
+        tpT.BackColor = SystemColors.Control;
+        tabs.TabPages.Add(tpT);
 
-        // ── Voice tab ────────────────────────────────────────────────────────
-        var tabV = new TabPage("Voice") { BackColor = tabBg };
-        y = 16;
-        tbApiKey  = new TextBox { Text = ClaudePusher.voiceApiKey, UseSystemPasswordChar = true };
-        y = AddRow(tabV, y, "OpenAI API key:", tbApiKey, 270);
+        // ── Tab: Voice ───────────────────────────────────────────────────────
+        var tpV = new TabPage("Voice");
+        y = 28;
+
+        tbApiKey   = new TextBox { Text = ClaudePusher.voiceApiKey, UseSystemPasswordChar = true, Left = CTRL_X, Top = y, Width = 350 };
+        chkShowKey = new CheckBox { Text = "Show", Left = CTRL_X + 354, Top = y + 2, AutoSize = true };
+        chkShowKey.CheckedChanged += (s, e) => tbApiKey.UseSystemPasswordChar = !chkShowKey.Checked;
+        tpV.Controls.AddRange(new Control[] { new Label { Text = "OpenAI API key:", Left = 12, Top = y + 3, Width = LBL_W }, tbApiKey, chkShowKey });
+        y += 32;
+
+        var btnTest  = new Button { Text = "Test API key", Left = CTRL_X, Top = y, Width = 100, Height = 24 };
+        lblKeyStatus = new Label  { Text = "", Left = CTRL_X + 108, Top = y + 4, Width = 260, ForeColor = SystemColors.GrayText };
+        btnTest.Click += OnTestApiKey;
+        tpV.Controls.AddRange(new Control[] { btnTest, lblKeyStatus });
+        y += 34;
 
         tbSttModel = new TextBox { Text = ClaudePusher.sttModel };
-        y = AddRow(tabV, y, "STT model:", tbSttModel, 120);
-
-        tbLanguage = new TextBox { Text = ClaudePusher.language };
-        y = AddRow(tabV, y, "Language (ru, en, ...):", tbLanguage, 80);
+        y = AddRow(tpV, y, "STT model:", tbSttModel, 100);
 
         tbTtsVoice = new TextBox { Text = ClaudePusher.ttsVoice };
-        y = AddRow(tabV, y, "TTS voice:", tbTtsVoice, 270);
+        y = AddRow(tpV, y, "TTS voice:", tbTtsVoice, 390);
 
-        nudRms = new NumericUpDown { Minimum = 0.001M, Maximum = 1M, Increment = 0.001M, DecimalPlaces = 3, Value = (decimal)ClaudePusher.silenceRms };
-        y = AddRow(tabV, y, "Silence RMS threshold:", nudRms, 100);
+        int rmsVal = Math.Max(1, Math.Min(50, (int)Math.Round(ClaudePusher.silenceRms * 1000)));
+        trkRms    = new TrackBar { Minimum = 1, Maximum = 50, Value = rmsVal, TickFrequency = 5, SmallChange = 1, Left = CTRL_X, Top = y, Width = 340 };
+        lblRmsVal = new Label   { Text = (rmsVal / 1000.0).ToString("F3"), Left = CTRL_X + 344, Top = y + 3, Width = 60 };
+        trkRms.ValueChanged += (s, e) => lblRmsVal.Text = (trkRms.Value / 1000.0).ToString("F3");
+        tpV.Controls.AddRange(new Control[] { new Label { Text = "Silence RMS:", Left = 12, Top = y + 3, Width = LBL_W }, trkRms, lblRmsVal });
+        y += 42;
 
-        nudSilSec = new NumericUpDown { Minimum = 0.1M, Maximum = 5M, Increment = 0.1M, DecimalPlaces = 1, Value = (decimal)ClaudePusher.silenceSec };
-        y = AddRow(tabV, y, "Silence duration (s):", nudSilSec, 80);
+        int silVal = Math.Max(3, Math.Min(30, (int)Math.Round(ClaudePusher.silenceSec * 10)));
+        trkSilSec    = new TrackBar { Minimum = 3, Maximum = 30, Value = silVal, TickFrequency = 3, SmallChange = 1, Left = CTRL_X, Top = y, Width = 340 };
+        lblSilSecVal = new Label   { Text = (silVal / 10.0).ToString("F1") + " s", Left = CTRL_X + 344, Top = y + 3, Width = 60 };
+        trkSilSec.ValueChanged += (s, e) => lblSilSecVal.Text = (trkSilSec.Value / 10.0).ToString("F1") + " s";
+        tpV.Controls.AddRange(new Control[] { new Label { Text = "Silence duration:", Left = 12, Top = y + 3, Width = LBL_W }, trkSilSec, lblSilSecVal });
+        y += 42;
 
-        nudMinAudio = new NumericUpDown { Minimum = 0.1M, Maximum = 5M, Increment = 0.1M, DecimalPlaces = 1, Value = (decimal)ClaudePusher.minAudioSec };
-        y = AddRow(tabV, y, "Min audio (s):", nudMinAudio, 80);
+        tpV.BackColor = SystemColors.Control;
+        tabs.TabPages.Add(tpV);
 
-        var lblLog = new Label { Text = "Log file:", Left = 12, Top = y + 3, Width = 160, AutoSize = false };
-        tbLogFile  = new TextBox { Text = ClaudePusher.logFile, Left = 180, Top = y, Width = 220 };
-        var btnBrowse = new Button { Text = "...", Left = 408, Top = y, Width = 32, Height = 23 };
-        btnBrowse.Click += (s, e) =>
+        // Enable chkVoice when API key is entered
+        tbApiKey.TextChanged += (s, e) => chkVoice.Enabled = !string.IsNullOrWhiteSpace(tbApiKey.Text);
+
+        // Fix ItemSize after DPI scaling (ItemSize is not auto-scaled by WinForms)
+        Load += (s, e) =>
         {
-            var dlg = new SaveFileDialog { Title = "Select log file", Filter = "Log files|*.log|All files|*.*", FileName = tbLogFile.Text };
-            if (dlg.ShowDialog() == DialogResult.OK) tbLogFile.Text = dlg.FileName;
+            float scale   = (float)tabs.Width / TAB_W;
+            tabs.ItemSize = new Size((int)(94 * scale), (int)(27 * scale));
         };
-        tabV.Controls.AddRange(new Control[] { lblLog, tbLogFile, btnBrowse });
 
-        // ── Assemble ─────────────────────────────────────────────────────────
-        tabs.TabPages.AddRange(new TabPage[] { tabG, tabT, tabV });
-        Controls.Add(tabs);
+        tabs.Height = y + 52;   // tallest tab content + tab header + padding
 
-        var btnOk     = new Button { Text = "OK",     DialogResult = DialogResult.OK,     Left = 306, Top = 393, Width = 80 };
-        var btnCancel = new Button { Text = "Cancel", DialogResult = DialogResult.Cancel, Left = 398, Top = 393, Width = 80 };
+        // ── Buttons ──────────────────────────────────────────────────────────
+        ClientSize = new Size(tabs.Width, tabs.Bottom + 46);
+        int btnTop    = tabs.Bottom + 10;
+        var btnOk     = new Button { Text = "OK",     DialogResult = DialogResult.OK,     Left = ClientSize.Width - 176, Top = btnTop, Width = 80 };
+        var btnCancel = new Button { Text = "Cancel", DialogResult = DialogResult.Cancel, Left = ClientSize.Width - 88,  Top = btnTop, Width = 80 };
         btnOk.Click += OnOk;
-        Controls.AddRange(new Control[] { btnOk, btnCancel });
+        Controls.AddRange(new Control[] { tabs, btnOk, btnCancel });
         AcceptButton = btnOk;
         CancelButton = btnCancel;
 
@@ -179,45 +185,65 @@ class SettingsForm : Form
         PerformLayout();
     }
 
-    static int AddRow(TabPage parent, int y, string label, Control ctrl, int ctrlWidth)
+    static int AddRow(TabPage tab, int y, string label, Control ctrl, int ctrlWidth)
     {
-        var lbl = new Label { Text = label, Left = 12, Top = y + 3, Width = 160, AutoSize = false };
-        ctrl.Left  = 180;
+        var lbl = new Label { Text = label, Left = 12, Top = y + 3, Width = LBL_W, AutoSize = false };
+        ctrl.Left  = CTRL_X;
         ctrl.Top   = y;
         ctrl.Width = ctrlWidth;
-        parent.Controls.AddRange(new Control[] { lbl, ctrl });
+        tab.Controls.AddRange(new Control[] { lbl, ctrl });
         return y + 30;
+    }
+
+    void OnTestApiKey(object sender, EventArgs e)
+    {
+        string key = tbApiKey.Text.Trim();
+        if (string.IsNullOrEmpty(key)) { lblKeyStatus.Text = "Enter key first"; lblKeyStatus.ForeColor = SystemColors.GrayText; return; }
+        lblKeyStatus.Text = "Testing..."; lblKeyStatus.ForeColor = SystemColors.GrayText;
+        var btn = (Button)sender; btn.Enabled = false;
+        new Thread(() =>
+        {
+            string msg; Color col;
+            try
+            {
+                var req = (HttpWebRequest)WebRequest.Create("https://api.openai.com/v1/models");
+                req.Headers["Authorization"] = "Bearer " + key;
+                req.Timeout = 8000;
+                using (req.GetResponse()) { }
+                msg = "✓ Valid"; col = Color.Green;
+            }
+            catch (WebException ex) when (ex.Response is HttpWebResponse r && (int)r.StatusCode == 401)
+            {
+                msg = "✗ Invalid key"; col = Color.Red;
+            }
+            catch (Exception ex)
+            {
+                msg = "✗ " + ex.Message.Substring(0, Math.Min(40, ex.Message.Length)); col = Color.Red;
+            }
+            if (!IsDisposed) BeginInvoke((Action)(() => { lblKeyStatus.Text = msg; lblKeyStatus.ForeColor = col; btn.Enabled = true; }));
+        }) { IsBackground = true }.Start();
     }
 
     void OnOk(object sender, EventArgs e)
     {
         ClaudePusher.encoding      = cbEncoding.SelectedItem?.ToString() ?? ClaudePusher.encoding;
-        ClaudePusher.idleThreshold = (int)nudIdle.Value;
+        ClaudePusher.idleThreshold = trkIdle.Value;
         ClaudePusher.SetAutoStartSilent(chkAutoStart.Checked);
 
-        bool restartNeeded = (chkTelegram.Checked != ClaudePusher.enableTelegram)
-                          || (chkVoice.Checked    != ClaudePusher.enableVoice);
-
-        ClaudePusher.enableTelegram = chkTelegram.Checked;
-        ClaudePusher.enableVoice    = chkVoice.Checked;
-
-        ClaudePusher.tgToken = tbToken.Text.Trim();
-        ClaudePusher.chatId  = tbChatId.Text.Trim();
-
+        bool voiceChanged        = chkVoice.Checked != ClaudePusher.enableVoice;
+        ClaudePusher.enableVoice = chkVoice.Enabled && chkVoice.Checked;
+        ClaudePusher.tgToken     = tbToken.Text.Trim();
+        ClaudePusher.chatId      = tbChatId.Text.Trim();
         ClaudePusher.voiceApiKey = tbApiKey.Text.Trim();
         ClaudePusher.sttModel    = tbSttModel.Text.Trim();
-        ClaudePusher.language    = tbLanguage.Text.Trim();
         ClaudePusher.ttsVoice    = tbTtsVoice.Text.Trim();
-        ClaudePusher.silenceRms  = (float)nudRms.Value;
-        ClaudePusher.silenceSec  = (float)nudSilSec.Value;
-        ClaudePusher.minAudioSec = (float)nudMinAudio.Value;
-        ClaudePusher.logFile     = tbLogFile.Text.Trim();
+        ClaudePusher.silenceRms  = trkRms.Value / 1000f;
+        ClaudePusher.silenceSec  = trkSilSec.Value / 10f;
 
         ClaudePusher.SaveConfig();
 
-        if (restartNeeded)
-            MessageBox.Show("Module changes will take effect after restart.", "ClaudePusher",
-                MessageBoxButtons.OK, MessageBoxIcon.Information);
+        if (voiceChanged)
+            ClaudePusher.ApplyVoiceChange();
     }
 }
 
@@ -980,6 +1006,7 @@ static class ClaudePusher
     static float    silentAccum  = 0f;
     static bool     isRecording  = false;
     static readonly object audioLock = new object();
+    static bool     voicePipeStarted = false;
     static bool     micActive    = false;  // mic on/off state
     static bool     isSpeaking   = false;  // TTS playing — suppresses VAD
     static float    lastRms      = 0f;
@@ -1477,7 +1504,21 @@ static class ClaudePusher
     static void StartVoiceModule()
     {
         StartVoicePipeServer();
+        voicePipeStarted = true;
         // Mic starts paused; user enables via tray or "[V] включи микрофон"
+    }
+
+    public static void ApplyVoiceChange()
+    {
+        if (enableVoice)
+        {
+            if (!voicePipeStarted) StartVoiceModule();
+        }
+        else
+        {
+            if (micActive) { micActive = false; StopMic(); }
+            UpdateTrayText(GetTrayText());
+        }
     }
 
     #endregion

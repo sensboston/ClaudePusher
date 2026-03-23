@@ -1,9 +1,25 @@
 {
-  "tg_token": "123456789:AAxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
-  "chat_id": "123456789",
-  "poll_interval_ms": 5000,
-  "question_interval_hours": 4,
-  "window_title": "Claude Code",
-  "idle_threshold_minutes": 3,
-  "encoding": "CP1251  Cyrillic"
+  "general": {
+    "encoding": "CP1251  Cyrillic",
+    "idle_threshold_minutes": 3,
+    "start_with_windows": false,
+    "enable_telegram": true,
+    "enable_voice": false
+  },
+  "telegram": {
+    "tg_token": "123456789:AAxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+    "chat_id": "123456789",
+    "poll_interval_ms": 5000,
+    "question_interval_hours": 4
+  },
+  "voice": {
+    "api_key": "sk-...",
+    "stt_model": "whisper-1",
+    "language": "",
+    "silence_rms": 0.005,
+    "silence_sec": 0.8,
+    "min_audio_sec": 0.5,
+    "tts_voice": "en-US-BrianMultilingualNeural",
+    "log_file": ""
+  }
 }
