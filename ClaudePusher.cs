@@ -38,13 +38,16 @@ using MP3Sharp;
 
 class SettingsForm : Form
 {
+    [System.Runtime.InteropServices.DllImport("user32.dll")]
+    static extern IntPtr SendMessage(IntPtr hWnd, uint msg, IntPtr wParam, IntPtr lParam);
+
     const int LBL_W  = 110;
     const int CTRL_X = 128;
 
     ComboBox cbEncoding;
     TrackBar trkIdle, trkRms, trkSilSec;
     Label    lblIdleVal, lblRmsVal, lblSilSecVal;
-    CheckBox chkAutoStart, chkVoice, chkShowKey;
+    CheckBox chkAutoStart, chkVoice;
     TextBox  tbToken, tbChatId;
     TextBox  tbApiKey, tbSttModel, tbTtsVoice;
     Label    lblKeyStatus;
@@ -94,18 +97,18 @@ class SettingsForm : Form
         y = AddRow(tpG, y, "Encoding:", cbEncoding, 280);
 
         int idleVal = Math.Max(3, Math.Min(30, ClaudePusher.idleThreshold));
-        trkIdle    = new TrackBar { Minimum = 3, Maximum = 30, Value = idleVal, TickFrequency = 3, SmallChange = 1, Left = CTRL_X, Top = y, Width = 340 };
+        trkIdle    = new TrackBar { Minimum = 3, Maximum = 30, Value = idleVal, TickFrequency = 3, SmallChange = 1, Left = CTRL_X, Top = y, Width = 340, AutoSize = false, Height = 45 };
         lblIdleVal = new Label   { Text = idleVal + " min", Left = CTRL_X + 344, Top = y + 3, Width = 60 };
         trkIdle.ValueChanged += (s, e) => lblIdleVal.Text = trkIdle.Value + " min";
         tpG.Controls.AddRange(new Control[] { new Label { Text = "Inactivity alert:", Left = 12, Top = y + 3, Width = LBL_W }, trkIdle, lblIdleVal });
-        y += 42;
+        y += 50;
 
         chkAutoStart = new CheckBox { Text = "Start with Windows", Checked = ClaudePusher.GetAutoStart(), Left = 12, Top = y, AutoSize = true };
-        tpG.Controls.Add(chkAutoStart); y += 28;
+        tpG.Controls.Add(chkAutoStart); y += 50;
 
         bool hasKey = !string.IsNullOrEmpty(ClaudePusher.voiceApiKey);
         chkVoice = new CheckBox { Text = "Enable Voice", Checked = ClaudePusher.enableVoice && hasKey, Enabled = hasKey, Left = 12, Top = y, AutoSize = true };
-        tpG.Controls.Add(chkVoice); y += 28;
+        tpG.Controls.Add(chkVoice); y += 50;
 
         tpG.BackColor = SystemColors.Control;
         tabs.TabPages.Add(tpG);
@@ -124,37 +127,42 @@ class SettingsForm : Form
         var tpV = new TabPage("Voice");
         y = 28;
 
-        tbApiKey   = new TextBox { Text = ClaudePusher.voiceApiKey, UseSystemPasswordChar = true, Left = CTRL_X, Top = y, Width = 350 };
-        chkShowKey = new CheckBox { Text = "Show", Left = CTRL_X + 354, Top = y + 2, AutoSize = true };
-        chkShowKey.CheckedChanged += (s, e) => tbApiKey.UseSystemPasswordChar = !chkShowKey.Checked;
-        tpV.Controls.AddRange(new Control[] { new Label { Text = "OpenAI API key:", Left = 12, Top = y + 3, Width = LBL_W }, tbApiKey, chkShowKey });
-        y += 32;
-
-        var btnTest  = new Button { Text = "Test API key", Left = CTRL_X, Top = y, Width = 100, Height = 24 };
-        lblKeyStatus = new Label  { Text = "", Left = CTRL_X + 108, Top = y + 4, Width = 260, ForeColor = SystemColors.GrayText };
+        // API key row: [textbox] [👁 outside, flush right] [gap] [Test]
+        const int TRK_W = 390;
+        const int BTN_TEST_W = 50;
+        const int EYE_W = 22;
+        tbApiKey = new TextBox { Text = ClaudePusher.voiceApiKey, UseSystemPasswordChar = true, Left = CTRL_X, Top = y, Width = TRK_W - EYE_W - 4 - BTN_TEST_W };
+        var btnEye = new Button {
+            Text = "👁", Left = CTRL_X + tbApiKey.Width, Top = y, Width = EYE_W, Height = 23,
+            FlatStyle = FlatStyle.Flat, Font = new System.Drawing.Font("Segoe UI Emoji", 9f),
+            Padding = System.Windows.Forms.Padding.Empty, TextAlign = ContentAlignment.MiddleCenter
+        };
+        btnEye.Click += (s, e) => tbApiKey.UseSystemPasswordChar = !tbApiKey.UseSystemPasswordChar;
+        lblKeyStatus = new Label { Text = "", Left = 0, Top = 0, Width = 0, Height = 0 }; // hidden, feedback via btnTest
+        var btnTest  = new Button { Text = "Test", Left = CTRL_X + TRK_W - BTN_TEST_W, Top = y, Width = BTN_TEST_W, Height = 23 };
         btnTest.Click += OnTestApiKey;
-        tpV.Controls.AddRange(new Control[] { btnTest, lblKeyStatus });
-        y += 34;
+        tpV.Controls.AddRange(new Control[] { new Label { Text = "OpenAI API key:", Left = 12, Top = y + 3, Width = LBL_W }, tbApiKey, btnEye, btnTest });
+        y += 50;
 
         tbSttModel = new TextBox { Text = ClaudePusher.sttModel };
         y = AddRow(tpV, y, "STT model:", tbSttModel, 100);
 
         tbTtsVoice = new TextBox { Text = ClaudePusher.ttsVoice };
-        y = AddRow(tpV, y, "TTS voice:", tbTtsVoice, 390);
+        y = AddRow(tpV, y, "TTS voice:", tbTtsVoice, TRK_W);
 
         int rmsVal = Math.Max(1, Math.Min(50, (int)Math.Round(ClaudePusher.silenceRms * 1000)));
-        trkRms    = new TrackBar { Minimum = 1, Maximum = 50, Value = rmsVal, TickFrequency = 5, SmallChange = 1, Left = CTRL_X, Top = y, Width = 340 };
-        lblRmsVal = new Label   { Text = (rmsVal / 1000.0).ToString("F3"), Left = CTRL_X + 344, Top = y + 3, Width = 60 };
+        trkRms    = new TrackBar { Minimum = 1, Maximum = 50, Value = rmsVal, TickFrequency = 5, SmallChange = 1, Left = CTRL_X, Top = y, Width = TRK_W - 64, AutoSize = false, Height = 45 };
+        lblRmsVal = new Label   { Text = (rmsVal / 1000.0).ToString("F3"), Left = CTRL_X + TRK_W - 60, Top = y + 3, Width = 60 };
         trkRms.ValueChanged += (s, e) => lblRmsVal.Text = (trkRms.Value / 1000.0).ToString("F3");
         tpV.Controls.AddRange(new Control[] { new Label { Text = "Silence RMS:", Left = 12, Top = y + 3, Width = LBL_W }, trkRms, lblRmsVal });
-        y += 42;
+        y += 50;
 
         int silVal = Math.Max(3, Math.Min(30, (int)Math.Round(ClaudePusher.silenceSec * 10)));
-        trkSilSec    = new TrackBar { Minimum = 3, Maximum = 30, Value = silVal, TickFrequency = 3, SmallChange = 1, Left = CTRL_X, Top = y, Width = 340 };
-        lblSilSecVal = new Label   { Text = (silVal / 10.0).ToString("F1") + " s", Left = CTRL_X + 344, Top = y + 3, Width = 60 };
+        trkSilSec    = new TrackBar { Minimum = 3, Maximum = 30, Value = silVal, TickFrequency = 3, SmallChange = 1, Left = CTRL_X, Top = y, Width = TRK_W - 64, AutoSize = false, Height = 45 };
+        lblSilSecVal = new Label   { Text = (silVal / 10.0).ToString("F1") + " s", Left = CTRL_X + TRK_W - 60, Top = y + 3, Width = 60 };
         trkSilSec.ValueChanged += (s, e) => lblSilSecVal.Text = (trkSilSec.Value / 10.0).ToString("F1") + " s";
         tpV.Controls.AddRange(new Control[] { new Label { Text = "Silence duration:", Left = 12, Top = y + 3, Width = LBL_W }, trkSilSec, lblSilSecVal });
-        y += 42;
+        y += 50;
 
         tpV.BackColor = SystemColors.Control;
         tabs.TabPages.Add(tpV);
@@ -192,15 +200,15 @@ class SettingsForm : Form
         ctrl.Top   = y;
         ctrl.Width = ctrlWidth;
         tab.Controls.AddRange(new Control[] { lbl, ctrl });
-        return y + 30;
+        return y + 50;
     }
 
     void OnTestApiKey(object sender, EventArgs e)
     {
         string key = tbApiKey.Text.Trim();
-        if (string.IsNullOrEmpty(key)) { lblKeyStatus.Text = "Enter key first"; lblKeyStatus.ForeColor = SystemColors.GrayText; return; }
-        lblKeyStatus.Text = "Testing..."; lblKeyStatus.ForeColor = SystemColors.GrayText;
-        var btn = (Button)sender; btn.Enabled = false;
+        var btn = (Button)sender;
+        if (string.IsNullOrEmpty(key)) { btn.Text = "?"; btn.ForeColor = SystemColors.GrayText; return; }
+        btn.Text = "..."; btn.ForeColor = SystemColors.GrayText; btn.Enabled = false;
         new Thread(() =>
         {
             string msg; Color col;
@@ -210,17 +218,21 @@ class SettingsForm : Form
                 req.Headers["Authorization"] = "Bearer " + key;
                 req.Timeout = 8000;
                 using (req.GetResponse()) { }
-                msg = "✓ Valid"; col = Color.Green;
+                msg = "✓"; col = Color.Green;
             }
             catch (WebException ex) when (ex.Response is HttpWebResponse r && (int)r.StatusCode == 401)
             {
-                msg = "✗ Invalid key"; col = Color.Red;
+                msg = "✗"; col = Color.Red;
             }
-            catch (Exception ex)
+            catch
             {
-                msg = "✗ " + ex.Message.Substring(0, Math.Min(40, ex.Message.Length)); col = Color.Red;
+                msg = "✗"; col = Color.Red;
             }
-            if (!IsDisposed) BeginInvoke((Action)(() => { lblKeyStatus.Text = msg; lblKeyStatus.ForeColor = col; btn.Enabled = true; }));
+            if (!IsDisposed) BeginInvoke((Action)(() =>
+            {
+                btn.Text = msg; btn.ForeColor = col; btn.Enabled = true;
+                var t = new System.Threading.Timer(_ => { if (!IsDisposed) BeginInvoke((Action)(() => { btn.Text = "Test"; btn.ForeColor = SystemColors.ControlText; })); }, null, 3000, System.Threading.Timeout.Infinite);
+            }));
         }) { IsBackground = true }.Start();
     }
 
