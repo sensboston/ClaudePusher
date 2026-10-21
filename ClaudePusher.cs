@@ -1,4 +1,4 @@
-// ClaudePusher 2.0 — unified Telegram + Voice interface for Claude Code.
+// ClaudePusher 2.2 — unified Telegram + Voice interface for Claude Code.
 //
 // Modules:
 //   Telegram: polls Telegram Bot API, injects messages into Claude Code, sends replies via pipe
@@ -28,8 +28,8 @@ using System.Windows.Forms;
 using Microsoft.Win32;
 using MP3Sharp;
 
-[assembly: AssemblyVersion("2.0.0.0")]
-[assembly: AssemblyFileVersion("2.0.0.0")]
+[assembly: AssemblyVersion("2.2.0.0")]
+[assembly: AssemblyFileVersion("2.2.0.0")]
 [assembly: AssemblyProduct("ClaudePusher")]
 [assembly: AssemblyDescription("Telegram + Voice interface for Claude Code")]
 [assembly: AssemblyCopyright("(c) 2026 sensboston")]
