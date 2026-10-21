@@ -130,8 +130,11 @@ class SettingsForm : Form
         chkVoice = new CheckBox { Text = "Enable Voice", Checked = ClaudePusher.enableVoice && hasKey, Enabled = hasKey, Left = 12, Top = y, AutoSize = true };
         tpG.Controls.Add(chkVoice); y += 50;
 
-        chkMicOnStart = new CheckBox { Text = "Mic on at startup", Checked = ClaudePusher.micOnStart, Left = 12, Top = y, AutoSize = true };
+        chkMicOnStart = new CheckBox { Text = "Mic on at startup", Checked = ClaudePusher.micOnStart, Enabled = chkVoice.Checked, Left = 12, Top = y, AutoSize = true };
         tpG.Controls.Add(chkMicOnStart); y += 50;
+        // Mic option only makes sense with voice enabled (and Enable Voice itself requires an API key)
+        chkVoice.CheckedChanged += (s, e) => chkMicOnStart.Enabled = chkVoice.Enabled && chkVoice.Checked;
+        chkVoice.EnabledChanged += (s, e) => chkMicOnStart.Enabled = chkVoice.Enabled && chkVoice.Checked;
 
         tpG.BackColor = SystemColors.Control;
         tabs.TabPages.Add(tpG);
@@ -326,7 +329,14 @@ class SettingsForm : Form
 static class ClaudePusher
 {
     const string APP_NAME    = "ClaudePusher";
-    const string APP_VERSION = "2.0";
+    // From AssemblyVersion, so the UI can't drift from the file version: "2.3" or "2.3.1"
+    static readonly string APP_VERSION = GetAppVersion();
+
+    static string GetAppVersion()
+    {
+        var v = Assembly.GetExecutingAssembly().GetName().Version;
+        return v.Build > 0 ? v.ToString(3) : v.ToString(2);
+    }
     const string PIPE_TG     = "claudepusher";
     const string PIPE_VOICE  = "voicepusher";
     const string REG_RUN_KEY = @"Software\Microsoft\Windows\CurrentVersion\Run";
@@ -1103,7 +1113,6 @@ static class ClaudePusher
     static bool     voicePipeStarted = false;
     static bool     micActive    = false;  // mic on/off state
     static bool     isSpeaking   = false;  // TTS playing — suppresses VAD
-    static float    lastRms      = 0f;
 
     // Barge-in: user's voice (louder than the speakers' echo) stops TTS and starts recording
     static volatile bool ttsAbort = false;
@@ -1236,8 +1245,6 @@ static class ClaudePusher
                 bargeInPre.Clear();
                 // the current chunk goes through the regular VAD below
             }
-
-            lastRms = rms;
 
             float chunkSec = samples / (float)SAMPLE_RATE;
             lock (audioLock)
@@ -2320,18 +2327,6 @@ static class ClaudePusher
                 if (enableVoice) ToggleMic();
             };
 
-            // RMS diagnostic tooltip when mic is on
-            if (enableVoice)
-            {
-                var diagTimer = new System.Windows.Forms.Timer { Interval = 1000 };
-                diagTimer.Tick += (ts, te) =>
-                {
-                    if (micActive && !isSpeaking)
-                        UpdateTrayText(string.Format("CP | RMS:{0:F4} thr:{1:F4}{2}",
-                            lastRms, silenceRms, isRecording ? " [REC]" : ""));
-                };
-                diagTimer.Start();
-            }
 
             // Start modules
             if (enableTelegram) StartTelegramModule();
