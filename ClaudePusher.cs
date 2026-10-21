@@ -1,4 +1,4 @@
-// ClaudePusher 2.2 — unified Telegram + Voice interface for Claude Code.
+// ClaudePusher 2.3 — unified Telegram + Voice interface for Claude Code.
 //
 // Modules:
 //   Telegram: polls Telegram Bot API, injects messages into Claude Code, sends replies via pipe
@@ -17,6 +17,7 @@ using System.Drawing;
 using System.Drawing.Drawing2D;
 using System.IO;
 using System.IO.Pipes;
+using System.Linq;
 using System.Net;
 using System.Reflection;
 using System.Runtime.InteropServices;
@@ -28,8 +29,8 @@ using System.Windows.Forms;
 using Microsoft.Win32;
 using MP3Sharp;
 
-[assembly: AssemblyVersion("2.2.0.0")]
-[assembly: AssemblyFileVersion("2.2.0.0")]
+[assembly: AssemblyVersion("2.3.0.0")]
+[assembly: AssemblyFileVersion("2.3.0.0")]
 [assembly: AssemblyProduct("ClaudePusher")]
 [assembly: AssemblyDescription("Telegram + Voice interface for Claude Code")]
 [assembly: AssemblyCopyright("(c) 2026 sensboston")]
@@ -45,11 +46,30 @@ class SettingsForm : Form
     const int CTRL_X = 128;
 
     ComboBox cbEncoding;
-    TrackBar trkIdle, trkRms, trkSilSec;
-    Label    lblIdleVal, lblRmsVal, lblSilSecVal;
-    CheckBox chkAutoStart, chkVoice;
+    TrackBar trkIdle, trkRms, trkSilSec, trkBarge, trkMinSpeech;
+    Label    lblIdleVal, lblRmsVal, lblSilSecVal, lblBargeVal, lblMinSpeechVal;
+    CheckBox chkAutoStart, chkVoice, chkMicOnStart;
     TextBox  tbToken, tbChatId;
-    TextBox  tbApiKey, tbSttModel, tbTtsVoice;
+    TextBox  tbApiKey, tbSttModel;
+    ComboBox cbTtsVoice;
+
+    // Edge voices that handle both Russian and English (multilingual) plus native Russian ones
+    static readonly string[][] TtsVoices = {
+        new[] { "en-US-BrianMultilingualNeural",    "male" },
+        new[] { "en-US-AndrewMultilingualNeural",   "male" },
+        new[] { "en-AU-WilliamMultilingualNeural",  "male" },
+        new[] { "fr-FR-RemyMultilingualNeural",     "male" },
+        new[] { "de-DE-FlorianMultilingualNeural",  "male" },
+        new[] { "it-IT-GiuseppeMultilingualNeural", "male" },
+        new[] { "ko-KR-HyunsuMultilingualNeural",   "male" },
+        new[] { "ru-RU-DmitryNeural",               "male, Russian only" },
+        new[] { "en-US-AvaMultilingualNeural",      "female" },
+        new[] { "en-US-EmmaMultilingualNeural",     "female" },
+        new[] { "fr-FR-VivienneMultilingualNeural", "female" },
+        new[] { "de-DE-SeraphinaMultilingualNeural","female" },
+        new[] { "pt-BR-ThalitaMultilingualNeural",  "female" },
+        new[] { "ru-RU-SvetlanaNeural",             "female, Russian only" },
+    };
     Label    lblKeyStatus;
 
     public SettingsForm()
@@ -110,6 +130,9 @@ class SettingsForm : Form
         chkVoice = new CheckBox { Text = "Enable Voice", Checked = ClaudePusher.enableVoice && hasKey, Enabled = hasKey, Left = 12, Top = y, AutoSize = true };
         tpG.Controls.Add(chkVoice); y += 50;
 
+        chkMicOnStart = new CheckBox { Text = "Mic on at startup", Checked = ClaudePusher.micOnStart, Left = 12, Top = y, AutoSize = true };
+        tpG.Controls.Add(chkMicOnStart); y += 50;
+
         tpG.BackColor = SystemColors.Control;
         tabs.TabPages.Add(tpG);
 
@@ -147,14 +170,42 @@ class SettingsForm : Form
         tbSttModel = new TextBox { Text = ClaudePusher.sttModel };
         y = AddRow(tpV, y, "STT model:", tbSttModel, 100);
 
-        tbTtsVoice = new TextBox { Text = ClaudePusher.ttsVoice };
-        y = AddRow(tpV, y, "TTS voice:", tbTtsVoice, TRK_W);
+        // Voice list is editable: any other Edge voice name can be typed in
+        cbTtsVoice = new ComboBox { DropDownStyle = ComboBoxStyle.DropDown, Left = CTRL_X, Top = y, Width = TRK_W - BTN_TEST_W - 4 };
+        foreach (var v in TtsVoices) cbTtsVoice.Items.Add(v[0] + "  (" + v[1] + ")");
+        int voiceIdx = Array.FindIndex(TtsVoices, v => v[0] == ClaudePusher.ttsVoice);
+        if (voiceIdx >= 0) cbTtsVoice.SelectedIndex = voiceIdx; else cbTtsVoice.Text = ClaudePusher.ttsVoice;
+        var btnPreview = new Button { Text = "▶", Left = CTRL_X + TRK_W - BTN_TEST_W, Top = y, Width = BTN_TEST_W, Height = 23 };
+        btnPreview.Click += (s, e) =>
+        {
+            string voice = SelectedTtsVoice();
+            new Thread(() => ClaudePusher.Speak("Привет, это мой голос. Hello, this is my voice.", voice)) { IsBackground = true }.Start();
+        };
+        tpV.Controls.AddRange(new Control[] { new Label { Text = "TTS voice:", Left = 12, Top = y + 3, Width = LBL_W }, cbTtsVoice, btnPreview });
+        y += 50;
 
         int rmsVal = Math.Max(1, Math.Min(50, (int)Math.Round(ClaudePusher.silenceRms * 1000)));
         trkRms    = new TrackBar { Minimum = 1, Maximum = 50, Value = rmsVal, TickFrequency = 5, SmallChange = 1, Left = CTRL_X, Top = y, Width = TRK_W - 64, AutoSize = false, Height = 45 };
         lblRmsVal = new Label   { Text = (rmsVal / 1000.0).ToString("F3"), Left = CTRL_X + TRK_W - 60, Top = y + 3, Width = 60 };
         trkRms.ValueChanged += (s, e) => lblRmsVal.Text = (trkRms.Value / 1000.0).ToString("F3");
         tpV.Controls.AddRange(new Control[] { new Label { Text = "Silence RMS:", Left = 12, Top = y + 3, Width = LBL_W }, trkRms, lblRmsVal });
+        y += 50;
+
+        // Voice louder than this interrupts TTS (0 = off); must stay above the speakers' echo level
+        int bargeVal = Math.Max(0, Math.Min(100, (int)Math.Round(ClaudePusher.bargeInRms * 1000)));
+        Func<int, string> bargeText = v => v == 0 ? "off" : (v / 1000.0).ToString("F3");
+        trkBarge    = new TrackBar { Minimum = 0, Maximum = 100, Value = bargeVal, TickFrequency = 10, SmallChange = 1, Left = CTRL_X, Top = y, Width = TRK_W - 64, AutoSize = false, Height = 45 };
+        lblBargeVal = new Label   { Text = bargeText(bargeVal), Left = CTRL_X + TRK_W - 60, Top = y + 3, Width = 60 };
+        trkBarge.ValueChanged += (s, e) => lblBargeVal.Text = bargeText(trkBarge.Value);
+        tpV.Controls.AddRange(new Control[] { new Label { Text = "Barge-in RMS:", Left = 12, Top = y + 3, Width = LBL_W }, trkBarge, lblBargeVal });
+        y += 50;
+
+        // Phrases whose loudest part stays below this are background speech (another room, TV); 0 = off
+        int minSpeechVal = Math.Max(0, Math.Min(100, (int)Math.Round(ClaudePusher.minSpeechRms * 1000)));
+        trkMinSpeech    = new TrackBar { Minimum = 0, Maximum = 100, Value = minSpeechVal, TickFrequency = 10, SmallChange = 1, Left = CTRL_X, Top = y, Width = TRK_W - 64, AutoSize = false, Height = 45 };
+        lblMinSpeechVal = new Label   { Text = bargeText(minSpeechVal), Left = CTRL_X + TRK_W - 60, Top = y + 3, Width = 60 };
+        trkMinSpeech.ValueChanged += (s, e) => lblMinSpeechVal.Text = bargeText(trkMinSpeech.Value);
+        tpV.Controls.AddRange(new Control[] { new Label { Text = "Min speech RMS:", Left = 12, Top = y + 3, Width = LBL_W }, trkMinSpeech, lblMinSpeechVal });
         y += 50;
 
         int silVal = Math.Max(3, Math.Min(30, (int)Math.Round(ClaudePusher.silenceSec * 10)));
@@ -191,6 +242,14 @@ class SettingsForm : Form
 
         ResumeLayout(false);
         PerformLayout();
+    }
+
+    // Voice name from the combo: list items carry a "  (male)" style suffix
+    string SelectedTtsVoice()
+    {
+        string text = cbTtsVoice.Text.Trim();
+        int sp = text.IndexOf(' ');
+        return sp > 0 ? text.Substring(0, sp) : text;
     }
 
     static int AddRow(TabPage tab, int y, string label, Control ctrl, int ctrlWidth)
@@ -244,12 +303,15 @@ class SettingsForm : Form
 
         bool voiceChanged        = chkVoice.Checked != ClaudePusher.enableVoice;
         ClaudePusher.enableVoice = chkVoice.Enabled && chkVoice.Checked;
+        ClaudePusher.micOnStart  = chkMicOnStart.Checked;
         ClaudePusher.tgToken     = tbToken.Text.Trim();
         ClaudePusher.chatId      = tbChatId.Text.Trim();
         ClaudePusher.voiceApiKey = tbApiKey.Text.Trim();
         ClaudePusher.sttModel    = tbSttModel.Text.Trim();
-        ClaudePusher.ttsVoice    = tbTtsVoice.Text.Trim();
+        ClaudePusher.ttsVoice    = SelectedTtsVoice();
         ClaudePusher.silenceRms  = trkRms.Value / 1000f;
+        ClaudePusher.bargeInRms  = trkBarge.Value / 1000f;
+        ClaudePusher.minSpeechRms = trkMinSpeech.Value / 1000f;
         ClaudePusher.silenceSec  = trkSilSec.Value / 10f;
 
         ClaudePusher.SaveConfig();
@@ -377,6 +439,7 @@ static class ClaudePusher
     [DllImport("winmm.dll")] static extern int waveOutUnprepareHeader(IntPtr h, IntPtr pHdr, int sz);
     [DllImport("winmm.dll")] static extern int waveOutWrite(IntPtr h, IntPtr pHdr, int sz);
     [DllImport("winmm.dll")] static extern int waveOutClose(IntPtr h);
+    [DllImport("winmm.dll")] static extern int waveOutReset(IntPtr h);
 
     delegate void WaveInProc(IntPtr h, int msg, IntPtr inst, ref WAVEHDR hdr, IntPtr p2);
     const int MM_WIM_DATA       = 0x3C0;
@@ -448,6 +511,10 @@ static class ClaudePusher
     [DllImport("shcore.dll")] static extern int SetProcessDpiAwareness(int value);
     [DllImport("kernel32.dll")] static extern bool AllocConsole();
     [DllImport("kernel32.dll")] static extern bool FreeConsoleK();
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern IntPtr FindWindowEx(IntPtr parent, IntPtr childAfter, string className, string windowName);
+    [DllImport("user32.dll")] static extern bool GetClientRect(IntPtr hWnd, out TrayRect rect);
+    [DllImport("user32.dll")] static extern IntPtr SendMessageW(IntPtr hWnd, uint msg, IntPtr wParam, IntPtr lParam);
+    [StructLayout(LayoutKind.Sequential)] struct TrayRect { public int Left, Top, Right, Bottom; }
 
     #endregion
 
@@ -469,6 +536,7 @@ static class ClaudePusher
     public static int    idleThreshold = 3;
     public static bool   enableTelegram = true;
     public static bool   enableVoice    = false;
+    public static bool   micOnStart     = true;
 
     // Telegram
     public static string tgToken = "";
@@ -479,6 +547,8 @@ static class ClaudePusher
     public static string sttModel    = "whisper-1";
     public static string language    = "";
     public static float  silenceRms  = 0.005f;
+    public static float  bargeInRms  = 0.025f;   // voice level that interrupts TTS; 0 = disabled
+    public static float  minSpeechRms = 0.03f;   // phrases with a quieter peak are ignored; 0 = disabled
     public static float  silenceSec  = 0.8f;
     public static float  minAudioSec = 0.5f;
     public static string ttsVoice    = "en-US-BrianMultilingualNeural";
@@ -516,6 +586,7 @@ static class ClaudePusher
                 if (general.ContainsKey("idle_threshold_minutes")) idleThreshold  = Convert.ToInt32(general["idle_threshold_minutes"]);
                 if (general.ContainsKey("enable_telegram"))        enableTelegram = Convert.ToBoolean(general["enable_telegram"]);
                 if (general.ContainsKey("enable_voice"))           enableVoice    = Convert.ToBoolean(general["enable_voice"]);
+                if (general.ContainsKey("mic_on_start"))           micOnStart     = Convert.ToBoolean(general["mic_on_start"]);
             }
             if (telegram != null)
             {
@@ -528,10 +599,16 @@ static class ClaudePusher
                 if (voice.ContainsKey("stt_model"))    sttModel    = voice["stt_model"].ToString();
                 if (voice.ContainsKey("language"))     language    = voice["language"].ToString();
                 if (voice.ContainsKey("silence_rms"))  float.TryParse(voice["silence_rms"].ToString(), out silenceRms);
+                if (voice.ContainsKey("barge_in_rms")) float.TryParse(voice["barge_in_rms"].ToString(), out bargeInRms);
+                if (voice.ContainsKey("min_speech_rms")) float.TryParse(voice["min_speech_rms"].ToString(), out minSpeechRms);
                 if (voice.ContainsKey("silence_sec"))  float.TryParse(voice["silence_sec"].ToString(), out silenceSec);
                 if (voice.ContainsKey("min_audio_sec")) float.TryParse(voice["min_audio_sec"].ToString(), out minAudioSec);
                 if (voice.ContainsKey("tts_voice"))    ttsVoice    = voice["tts_voice"].ToString();
                 if (voice.ContainsKey("log_file"))     logFile     = voice["log_file"].ToString();
+                var levels = voice.ContainsKey("echo_levels") ? voice["echo_levels"] as Dictionary<string, object> : null;
+                if (levels != null)
+                    lock (echoLevels)
+                        foreach (var kv in levels) echoLevels[kv.Key] = Convert.ToSingle(kv.Value);
             }
 
             if (enableTelegram) return !string.IsNullOrEmpty(tgToken) && !string.IsNullOrEmpty(chatId);
@@ -563,7 +640,8 @@ static class ClaudePusher
                         { "idle_threshold_minutes", idleThreshold },
                         { "start_with_windows",     GetAutoStart() },
                         { "enable_telegram",        enableTelegram },
-                        { "enable_voice",           enableVoice    }
+                        { "enable_voice",           enableVoice    },
+                        { "mic_on_start",           micOnStart     }
                     }
                 },
                 { "telegram", new Dictionary<string, object>
@@ -578,10 +656,13 @@ static class ClaudePusher
                         { "stt_model",    sttModel    },
                         { "language",     language    },
                         { "silence_rms",  silenceRms  },
+                        { "barge_in_rms", bargeInRms  },
+                        { "min_speech_rms", minSpeechRms },
                         { "silence_sec",  silenceSec  },
                         { "min_audio_sec", minAudioSec },
                         { "tts_voice",    ttsVoice    },
-                        { "log_file",     logFile     }
+                        { "log_file",     logFile     },
+                        { "echo_levels",  EchoLevelsSnapshot() }
                     }
                 }
             };
@@ -1016,12 +1097,60 @@ static class ClaudePusher
 
     static readonly List<short> audioBuf   = new List<short>();
     static float    silentAccum  = 0f;
+    static float    segmentPeak  = 0f;   // loudest chunk of the phrase being recorded
     static bool     isRecording  = false;
     static readonly object audioLock = new object();
     static bool     voicePipeStarted = false;
     static bool     micActive    = false;  // mic on/off state
     static bool     isSpeaking   = false;  // TTS playing — suppresses VAD
     static float    lastRms      = 0f;
+
+    // Barge-in: user's voice (louder than the speakers' echo) stops TTS and starts recording
+    static volatile bool ttsAbort = false;
+    static int      bargeInHits  = 0;   // last 3 chunks as bits: 1 = louder than bargeInRms
+    static readonly Queue<short[]> bargeInPre = new Queue<short[]>();   // ~0.5 s before the trigger
+
+    // Text being spoken, to drop its echo if it still gets transcribed
+    static string   ttsText      = "";
+    static DateTime ttsEndedAt   = DateTime.MinValue;
+
+    // Self-tuning barge-in: echo level of each voice is learned from phrases played to the end
+    static string   ttsVoiceNow  = "";
+    static readonly List<float> ttsEchoRms = new List<float>();               // mic level during the current phrase
+    static readonly Dictionary<string, float> echoLevels = new Dictionary<string, float>();  // voice -> echo level (95th pct)
+    const float BARGE_IN_UNLEARNED = 0.06f;   // conservative threshold until a voice's echo is known
+
+    static float BargeInThreshold()
+    {
+        float echo;
+        lock (echoLevels)
+            if (!echoLevels.TryGetValue(ttsVoiceNow, out echo)) return Math.Max(bargeInRms, BARGE_IN_UNLEARNED);
+        return Math.Max(bargeInRms, echo * 2f);
+    }
+
+    static void LearnEcho(string voice)
+    {
+        float[] v;
+        lock (ttsEchoRms) v = ttsEchoRms.ToArray();
+        if (v.Length < 8) return;   // phrase shorter than ~2 s: not enough data
+        Array.Sort(v);
+        float p95 = v[(int)(v.Length * 0.95)];
+        float level;
+        lock (echoLevels)
+        {
+            float prev;
+            level = echoLevels.TryGetValue(voice, out prev) ? prev * 0.7f + p95 * 0.3f : p95;
+            echoLevels[voice] = level;
+        }
+        LogVoice(string.Format("[TTS] echo {0:F4} (phrase {1:F4}) for {2}, barge-in threshold {3:F4}",
+            level, p95, voice, Math.Max(bargeInRms, level * 2f)));
+        SaveConfig();
+    }
+
+    static Dictionary<string, float> EchoLevelsSnapshot()
+    {
+        lock (echoLevels) return new Dictionary<string, float>(echoLevels);
+    }
 
     static void StartMic()
     {
@@ -1073,11 +1202,41 @@ static class ClaudePusher
             Marshal.Copy(hdr.lpData, chunk, 0, samples);
             waveInAddBuffer(hWi, ref hdr, Marshal.SizeOf(hdr));
 
-            if (!micActive || isSpeaking || samples == 0) return;
+            if (!micActive || samples == 0) return;
 
             double sum = 0;
             foreach (var s in chunk) sum += (double)s * s;
             float rms = (float)Math.Sqrt(sum / samples) / 32768f;
+
+            if (isSpeaking && !ttsAbort)
+            {
+                // 2 loud chunks out of the last 3, so a short pause between words doesn't reset detection
+                lock (ttsEchoRms) ttsEchoRms.Add(rms);
+                bargeInHits = ((bargeInHits << 1) | (bargeInRms > 0 && rms > BargeInThreshold() ? 1 : 0)) & 7;
+                int loud = (bargeInHits & 1) + ((bargeInHits >> 1) & 1) + ((bargeInHits >> 2) & 1);
+                if (loud < 2)
+                {
+                    bargeInPre.Enqueue(chunk);
+                    while (bargeInPre.Count > 2) bargeInPre.Dequeue();
+                    return;
+                }
+
+                // Voice detected: stop speaking and record from ~0.5 s back
+                ttsAbort    = true;
+                bargeInHits = 0;
+                LogVoice("[TTS] " + DateTime.Now.ToString("HH:mm:ss.fff") + " barge-in");
+                lock (audioLock)
+                {
+                    audioBuf.Clear();
+                    foreach (var pre in bargeInPre) audioBuf.AddRange(pre);
+                    isRecording = true;
+                    silentAccum = 0f;
+                    segmentPeak = 0f;
+                }
+                bargeInPre.Clear();
+                // the current chunk goes through the regular VAD below
+            }
+
             lastRms = rms;
 
             float chunkSec = samples / (float)SAMPLE_RATE;
@@ -1085,8 +1244,10 @@ static class ClaudePusher
             {
                 if (rms > silenceRms)
                 {
+                    if (!isRecording) segmentPeak = 0f;
                     isRecording = true;
                     silentAccum = 0f;
+                    segmentPeak = Math.Max(segmentPeak, rms);
                     audioBuf.AddRange(chunk);
                 }
                 else if (isRecording)
@@ -1100,8 +1261,14 @@ static class ClaudePusher
                         silentAccum = 0f;
                         isRecording = false;
                         float dur   = audio.Length / (float)SAMPLE_RATE;
-                        if (dur >= minAudioSec)
+                        // Quiet phrase (other room, TV, far away): not addressed to us, don't send to STT
+                        if (minSpeechRms > 0 && segmentPeak < minSpeechRms)
+                            LogVoice(string.Format("[QUIET] dropped {0:F1} s, peak {1:F4}", dur, segmentPeak));
+                        else if (dur >= minAudioSec)
+                        {
+                            LogVoice(string.Format("[SPEECH] {0:F1} s, peak {1:F4}", dur, segmentPeak));
                             new Thread(() => Transcribe(audio)) { IsBackground = true }.Start();
+                        }
                     }
                 }
             }
@@ -1200,6 +1367,8 @@ static class ClaudePusher
                     "subtitles by the amara.org community","beep","silence","uh","um","hmm","mm","ah","oh" })
                     if (lower == h || lower.StartsWith("thank you from")) return;
 
+                if (IsTtsEcho(text)) { LogVoice("[ECHO] dropped: " + text); return; }
+
                 if (!string.IsNullOrEmpty(logFile))
                     try { File.AppendAllText(logFile, text + "\n", Encoding.UTF8); } catch { }
 
@@ -1242,11 +1411,53 @@ static class ClaudePusher
 
     static readonly SemaphoreSlim ttsSem = new SemaphoreSlim(1, 1);
 
-    static void Speak(string text)
+    public static void Speak(string text, string voice = null)
     {
-        if (!ttsSem.Wait(35000)) return;
-        try   { isSpeaking = true; SpeakNative(text); }
-        finally { isSpeaking = false; ttsSem.Release(); }
+        if (!ttsSem.Wait(35000)) { LogVoice("[TTS] busy, phrase skipped"); return; }
+        var sw = Stopwatch.StartNew();
+        string speakVoice = voice ?? ttsVoice;
+        lock (ttsEchoRms) ttsEchoRms.Clear();
+        try   { ttsAbort = false; bargeInHits = 0; ttsText = text; ttsVoiceNow = speakVoice; isSpeaking = true; SpeakNative(text, speakVoice); }
+        finally
+        {
+            bool aborted = ttsAbort;
+            isSpeaking = false; ttsAbort = false; ttsEndedAt = DateTime.UtcNow; ttsSem.Release();
+            LogVoice(string.Format("[TTS] {0} in {1} ms", aborted ? "interrupted" : "done", sw.ElapsedMilliseconds));
+            if (!aborted) LearnEcho(speakVoice);   // interrupted phrases contain the user's voice, not just echo
+        }
+    }
+
+    // True if the transcript is (mostly) the phrase just spoken, i.e. the speakers' echo
+    static bool IsTtsEcho(string transcript)
+    {
+        if (string.IsNullOrEmpty(ttsText)) return false;
+        if (!isSpeaking && (DateTime.UtcNow - ttsEndedAt).TotalSeconds > 15) return false;
+
+        Func<string, string[]> words = s => Regex.Split(s.ToLowerInvariant().Replace('ё', 'е'), @"[^\p{L}\p{Nd}]+")
+                                                 .Where(w => w.Length > 1).ToArray();
+        string[] heard = words(transcript);
+        if (heard.Length < 3) return false;
+        var spoken = new HashSet<string>(words(ttsText));
+        int matched = heard.Count(w => spoken.Contains(w));
+        return matched >= heard.Length * 0.7;
+    }
+
+    static void LogVoice(string line)
+    {
+        if (!string.IsNullOrEmpty(logFile))
+            try { File.AppendAllText(logFile, line + "\n", Encoding.UTF8); } catch { }
+    }
+
+    // Wait until waveOut marks the buffer done (WHDR_DONE); false on timeout
+    static bool WaitWaveOutDone(IntPtr pHdr, int flagOffset, int timeoutMs)
+    {
+        var sw = Stopwatch.StartNew();
+        while ((Marshal.ReadInt32(pHdr, flagOffset) & 1) == 0)
+        {
+            if (ttsAbort || sw.ElapsedMilliseconds > timeoutMs) return false;
+            Thread.Sleep(5);
+        }
+        return true;
     }
 
     // Token format v2: "<CS64, 16 hex>-<SHA256, 64 hex>", both computed over "<5-min rounded FILETIME><TOKEN>".
@@ -1436,7 +1647,7 @@ static class ClaudePusher
         return GenerateSecMsGec(DateTime.UtcNow.ToFileTimeUtc());
     }
 
-    static void SpeakNative(string text)
+    static void SpeakNative(string text, string voice)
     {
         const string UA    = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
                              "(KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36 Edg/143.0.0.0";
@@ -1482,6 +1693,7 @@ static class ClaudePusher
 
             hWs = WinHttpWebSocketCompleteUpgrade(hRequest, IntPtr.Zero);
             if (hWs == IntPtr.Zero) throw new Exception("CompleteUpgrade: " + Marshal.GetLastWin32Error());
+            LogVoice("[TTS] " + DateTime.Now.ToString("HH:mm:ss.fff") + " connected");
             WinHttpCloseHandle(hRequest); hRequest = IntPtr.Zero;
 
             string ts = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ss.fffZ");
@@ -1501,7 +1713,7 @@ static class ClaudePusher
                 "X-Timestamp:" + ts + "\r\n" +
                 "Path:ssml\r\n\r\n" +
                 "<speak version='1.0' xmlns='http://www.w3.org/2001/10/synthesis' xml:lang='en-US'>" +
-                "<voice name='" + ttsVoice + "'><prosody rate='+0%' pitch='+0Hz'>" +
+                "<voice name='" + voice + "'><prosody rate='+0%' pitch='+0Hz'>" +
                 safe + "</prosody></voice></speak>");
 
             var mp3Queue   = new BlockingCollection<byte[]>(32);
@@ -1573,20 +1785,27 @@ static class ClaudePusher
 
                 const int PCM_CHUNK = 32768;
                 const int MAX_OUT   = 4;
+                // A buffer plays ~0.35 s; if the device doesn't return it in time, reset playback
+                // instead of waiting forever (mic input is ignored while speaking)
+                const int WAVE_TIMEOUT_MS = 5000;
                 int hdrSz      = Marshal.SizeOf(typeof(WAVEHDR));
                 int flagOffset = IntPtr.Size + 4 + 4 + IntPtr.Size;
+                bool stalled   = false;
 
                 var    pending = new Queue<Tuple<IntPtr, GCHandle>>();
                 byte[] readBuf = new byte[PCM_CHUNK];
                 int    nRead;
 
-                while ((nRead = mp3s.Read(readBuf, 0, readBuf.Length)) > 0)
+                while (!stalled && !ttsAbort && (nRead = mp3s.Read(readBuf, 0, readBuf.Length)) > 0)
                 {
                     while (pending.Count >= MAX_OUT)
                     {
                         var front = pending.Peek();
-                        while ((Marshal.ReadInt32(front.Item1, flagOffset) & 1) == 0)
-                            Thread.Sleep(5);
+                        if (!WaitWaveOutDone(front.Item1, flagOffset, WAVE_TIMEOUT_MS))
+                        {
+                            waveOutReset(hWo);   // marks all queued buffers as done
+                            stalled = !ttsAbort;
+                        }
                         waveOutUnprepareHeader(hWo, front.Item1, hdrSz);
                         Marshal.FreeHGlobal(front.Item1);
                         front.Item2.Free();
@@ -1611,19 +1830,24 @@ static class ClaudePusher
                     pending.Enqueue(Tuple.Create(pHdr, pin));
                 }
                 mp3s.Close();
+                if (ttsAbort) waveOutReset(hWo);   // barge-in: drop the rest of the phrase
 
                 foreach (var item in pending)
                 {
-                    while ((Marshal.ReadInt32(item.Item1, flagOffset) & 1) == 0)
-                        Thread.Sleep(5);
+                    if (!WaitWaveOutDone(item.Item1, flagOffset, WAVE_TIMEOUT_MS))
+                    {
+                        waveOutReset(hWo);
+                        stalled = !ttsAbort;
+                    }
                     waveOutUnprepareHeader(hWo, item.Item1, hdrSz);
                     Marshal.FreeHGlobal(item.Item1);
                     item.Item2.Free();
                 }
+                if (stalled) LogVoice("[TTS] " + DateTime.Now.ToString("HH:mm:ss.fff") + " waveOut stalled, playback reset");
             }
             finally { if (hWo != IntPtr.Zero) waveOutClose(hWo); }
 
-            recvThread.Join(5000);
+            if (!ttsAbort) recvThread.Join(5000);
             try { WinHttpWebSocketClose(hWs, 1000, IntPtr.Zero, 0); } catch { }
         }
         catch (Exception ex)
@@ -1693,7 +1917,13 @@ static class ClaudePusher
     {
         StartVoicePipeServer();
         voicePipeStarted = true;
-        // Mic starts paused; user enables via tray or "[V] включи микрофон"
+        // Otherwise the mic starts paused; user enables it via tray or "[V] включи микрофон"
+        if (micOnStart)
+        {
+            micActive = true;
+            StartMic();
+            UpdateTrayText(GetTrayText());
+        }
     }
 
     public static void ApplyVoiceChange()
@@ -2008,6 +2238,29 @@ static class ClaudePusher
     #region Main
 
     static Mutex instanceMutex;
+    const string EXIT_EVENT = "ClaudePusher_Exit";
+
+    // Icons of killed processes stay in the tray until hovered: "hover" over the notification area to purge them
+    static void PurgeDeadTrayIcons()
+    {
+        IntPtr h = FindWindowEx(IntPtr.Zero, IntPtr.Zero, "Shell_TrayWnd", null);
+        h = FindWindowEx(h, IntPtr.Zero, "TrayNotifyWnd", null);
+        h = FindWindowEx(h, IntPtr.Zero, "SysPager", null);
+        HoverToolbar(FindWindowEx(h, IntPtr.Zero, "ToolbarWindow32", null));
+
+        IntPtr overflow = FindWindowEx(IntPtr.Zero, IntPtr.Zero, "NotifyIconOverflowWindow", null);
+        HoverToolbar(FindWindowEx(overflow, IntPtr.Zero, "ToolbarWindow32", null));
+    }
+
+    static void HoverToolbar(IntPtr toolbar)
+    {
+        const uint WM_MOUSEMOVE = 0x0200;
+        TrayRect r;
+        if (toolbar == IntPtr.Zero || !GetClientRect(toolbar, out r)) return;
+        for (int x = 0; x < r.Right; x += 5)
+            for (int y = 0; y < r.Bottom; y += 5)
+                SendMessageW(toolbar, WM_MOUSEMOVE, IntPtr.Zero, (IntPtr)((y << 16) | (x & 0xFFFF)));
+    }
 
     [STAThread]
     static void Main()
@@ -2043,6 +2296,8 @@ static class ClaudePusher
         uiForm.Load += (s, e) =>
         {
             uiCtx = uiForm;
+
+            try { PurgeDeadTrayIcons(); } catch { }
 
             tray = new NotifyIcon
             {
@@ -2091,6 +2346,15 @@ static class ClaudePusher
                     Thread.Sleep(3000);
                 }
             }) { IsBackground = true }.Start();
+
+            // Graceful exit on request (e.g. before rebuild): unlike a killed process,
+            // this removes the tray icon instead of leaving a dead one behind
+            new Thread(() =>
+            {
+                using (var exitEvent = new EventWaitHandle(false, EventResetMode.AutoReset, EXIT_EVENT))
+                    exitEvent.WaitOne();
+                uiForm.BeginInvoke((Action)(() => { tray.Visible = false; Application.Exit(); }));
+            }) { IsBackground = true }.Start();
         };
 
         Application.Run(uiForm);
@@ -2117,7 +2381,8 @@ class StreamingMp3Source : Stream
     {
         while (_current == null || _pos >= _current.Length)
         {
-            try   { _current = _q.Take(); _pos = 0; }
+            // Bounded wait: a stalled connection must not keep TTS (and the muted mic) busy forever
+            try   { if (!_q.TryTake(out _current, 10000)) return 0; _pos = 0; }
             catch (InvalidOperationException) { return 0; }
         }
         int n = Math.Min(count, _current.Length - _pos);
