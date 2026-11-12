@@ -1,6 +1,7 @@
-// ClaudePusher 2.3 — unified Telegram + Voice interface for Claude Code.
+// ClaudePusher 2.4 — unified Telegram + Voice interface for Claude Code.
 //
 // Modules:
+//   Notify:   127.0.0.1 endpoint: a trusted local program raises an event code, a fixed line is injected
 //   Telegram: polls Telegram Bot API, injects messages into Claude Code, sends replies via pipe
 //   Voice:    mic (winmm.dll) → energy VAD → Whisper STT → "[V] text" injected into Claude
 //             Named pipe "voicepusher" → Edge TTS (WebSocket) → waveOut playback
@@ -19,6 +20,7 @@ using System.IO;
 using System.IO.Pipes;
 using System.Linq;
 using System.Net;
+using System.Net.Sockets;
 using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Text;
@@ -29,8 +31,8 @@ using System.Windows.Forms;
 using Microsoft.Win32;
 using MP3Sharp;
 
-[assembly: AssemblyVersion("2.3.0.0")]
-[assembly: AssemblyFileVersion("2.3.0.0")]
+[assembly: AssemblyVersion("2.4.0.0")]
+[assembly: AssemblyFileVersion("2.4.0.0")]
 [assembly: AssemblyProduct("ClaudePusher")]
 [assembly: AssemblyDescription("Telegram + Voice interface for Claude Code")]
 [assembly: AssemblyCopyright("(c) 2026 sensboston")]
@@ -621,6 +623,9 @@ static class ClaudePusher
                         foreach (var kv in levels) echoLevels[kv.Key] = Convert.ToSingle(kv.Value);
             }
 
+            notifySection = cfg.ContainsKey("notify") ? cfg["notify"] as Dictionary<string, object> : null;
+            LoadNotifyConfig();
+
             if (enableTelegram) return !string.IsNullOrEmpty(tgToken) && !string.IsNullOrEmpty(chatId);
             if (enableVoice)    return !string.IsNullOrEmpty(voiceApiKey);
             return true;
@@ -676,6 +681,7 @@ static class ClaudePusher
                     }
                 }
             };
+            if (notifySection != null) cfg["notify"] = notifySection;
             File.WriteAllText(configFile, json.Serialize(cfg), Encoding.UTF8);
         }
         catch { }
@@ -1088,6 +1094,149 @@ static class ClaudePusher
                 catch { Thread.Sleep(500); }
             }
         }) { IsBackground = true }.Start();
+    }
+
+    #endregion
+
+    #region Notify module — local event codes → fixed injected lines
+
+    // A local HTTP endpoint (127.0.0.1 only) that lets a trusted local program, e.g. a browser
+    // extension, raise one of a fixed set of events. The request carries only an event code;
+    // the injected line comes from config, so a caller can never inject free text.
+    //
+    //   "notify": {
+    //     "port": 48765,
+    //     "token": "<random secret>",
+    //     "allowed_origin": "chrome-extension://<id>",   // optional; empty = any extension origin
+    //     "events": { "turn_ended": "[A] turn ended", ... }
+    //   }
+    //
+    // Request: POST /notify?event=<code> with header "X-Notify-Token: <token>". Reply 204/400/403.
+
+    static Dictionary<string, object> notifySection;
+    static int    notifyPort;
+    static string notifyToken = "";
+    static string notifyOrigin = "";
+    static readonly Dictionary<string, string> notifyEvents = new Dictionary<string, string>();
+    static readonly Dictionary<string, DateTime> notifyLast = new Dictionary<string, DateTime>();
+    const int NOTIFY_REPEAT_SEC = 30;
+
+    static void LoadNotifyConfig()
+    {
+        notifyPort = 0; notifyToken = ""; notifyOrigin = "";
+        lock (notifyEvents) notifyEvents.Clear();
+        if (notifySection == null) return;
+        if (notifySection.ContainsKey("port"))           notifyPort   = Convert.ToInt32(notifySection["port"]);
+        if (notifySection.ContainsKey("token"))          notifyToken  = notifySection["token"].ToString();
+        if (notifySection.ContainsKey("allowed_origin")) notifyOrigin = notifySection["allowed_origin"].ToString();
+        var events = notifySection.ContainsKey("events") ? notifySection["events"] as Dictionary<string, object> : null;
+        if (events != null)
+            lock (notifyEvents)
+                foreach (var kv in events)
+                    if (Regex.IsMatch(kv.Key, "^[a-z0-9_]{1,32}$")) notifyEvents[kv.Key] = kv.Value.ToString();
+    }
+
+    static bool NotifyEnabled
+    {
+        get { return notifyPort > 0 && notifyPort < 65536 && notifyToken.Length >= 16 && notifyEvents.Count > 0; }
+    }
+
+    static void StartNotifyModule()
+    {
+        if (!NotifyEnabled) return;
+        new Thread(() =>
+        {
+            TcpListener listener;
+            try
+            {
+                listener = new TcpListener(IPAddress.Loopback, notifyPort);
+                listener.Start();
+            }
+            catch { return; }
+            while (true)
+            {
+                try
+                {
+                    var client = listener.AcceptTcpClient();
+                    new Thread(() => HandleNotify(client)) { IsBackground = true }.Start();
+                }
+                catch { Thread.Sleep(500); }
+            }
+        }) { IsBackground = true }.Start();
+    }
+
+    static void HandleNotify(TcpClient client)
+    {
+        using (client)
+        {
+            try
+            {
+                client.ReceiveTimeout = 3000;
+                client.SendTimeout = 3000;
+                var stream = client.GetStream();
+
+                // Read the request head only (no body is used); cap it at 8 KB.
+                var head = new StringBuilder();
+                var buf = new byte[1];
+                while (head.Length < 8192)
+                {
+                    if (stream.Read(buf, 0, 1) != 1) break;
+                    head.Append((char)buf[0]);
+                    if (head.Length >= 4 && head.ToString(head.Length - 4, 4) == "\r\n\r\n") break;
+                }
+                var lines = head.ToString().Split(new[] { "\r\n" }, StringSplitOptions.None);
+                var request = lines[0].Split(' ');
+                var headers = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+                for (int i = 1; i < lines.Length; i++)
+                {
+                    int colon = lines[i].IndexOf(':');
+                    if (colon > 0) headers[lines[i].Substring(0, colon).Trim()] = lines[i].Substring(colon + 1).Trim();
+                }
+
+                int status = NotifyStatus(request, headers);
+                string reason = status == 204 ? "No Content" : status == 403 ? "Forbidden" : "Bad Request";
+                var reply = Encoding.ASCII.GetBytes("HTTP/1.1 " + status + " " + reason + "\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+                stream.Write(reply, 0, reply.Length);
+            }
+            catch { }
+        }
+    }
+
+    static int NotifyStatus(string[] request, Dictionary<string, string> headers)
+    {
+        if (request.Length < 2 || request[0] != "POST") return 400;
+
+        string token;
+        if (!headers.TryGetValue("X-Notify-Token", out token) || !FixedTimeEquals(token, notifyToken)) return 403;
+
+        string origin;
+        headers.TryGetValue("Origin", out origin);
+        if (!string.IsNullOrEmpty(notifyOrigin) ? origin != notifyOrigin
+                                                : !string.IsNullOrEmpty(origin) && !origin.StartsWith("chrome-extension://"))
+            return 403;
+
+        var m = Regex.Match(request[1], @"^/notify\?event=([a-z0-9_]{1,32})$");
+        if (!m.Success) return 400;
+        string code = m.Groups[1].Value, line;
+        lock (notifyEvents) if (!notifyEvents.TryGetValue(code, out line)) return 400;
+
+        lock (notifyLast)
+        {
+            DateTime last;
+            if (notifyLast.TryGetValue(code, out last) && (DateTime.UtcNow - last).TotalSeconds < NOTIFY_REPEAT_SEC)
+                return 204;
+            notifyLast[code] = DateTime.UtcNow;
+        }
+        new Thread(() => InjectToClaude(line)) { IsBackground = true }.Start();
+        return 204;
+    }
+
+    static bool FixedTimeEquals(string a, string b)
+    {
+        if (a == null || b == null || a.Length != b.Length) return false;
+        int diff = 0;
+        for (int i = 0; i < a.Length; i++) diff |= a[i] ^ b[i];
+        return diff == 0;
     }
 
     #endregion
@@ -2331,6 +2480,7 @@ static class ClaudePusher
             // Start modules
             if (enableTelegram) StartTelegramModule();
             if (enableVoice)    StartVoiceModule();
+            StartNotifyModule();
 
             // Window cache refresh
             new Thread(() =>

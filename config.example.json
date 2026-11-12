@@ -21,5 +21,13 @@
     "min_audio_sec": 0.5,
     "tts_voice": "en-US-BrianMultilingualNeural",
     "log_file": ""
+  },
+  "notify": {
+    "port": 48765,
+    "token": "change-me-to-a-random-secret",
+    "allowed_origin": "",
+    "events": {
+      "build_done": "[N] build finished"
+    }
   }
 }

@@ -100,6 +100,25 @@ Optional: add to Windows startup via tray menu, or from command line:
 ClaudePusher.exe --autostart
 ```
 
+## Local notifications (optional)
+
+A trusted local program (for example a browser extension that watches a page) can ask ClaudePusher to
+inject one of a fixed set of lines into Claude Code. It sends only an event code; the text comes from
+`config.json`, so a caller can never inject free text.
+
+```json
+"notify": {
+  "port": 48765,
+  "token": "<random secret, 16+ characters>",
+  "allowed_origin": "chrome-extension://<extension id>",
+  "events": { "build_done": "[N] build finished", "needs_login": "[N] please log in" }
+}
+```
+
+Request: `POST http://127.0.0.1:<port>/notify?event=<code>` with header `X-Notify-Token: <token>`.
+The listener binds to 127.0.0.1 only; a wrong token or origin gets 403, an unknown code 400, and the
+same event is not injected twice within 30 seconds. Leave the section out to disable the feature.
+
 ## Claude Code permissions
 
 ClaudePusher communicates with Claude Code via a named pipe. For Claude to write to the pipe, it needs permission to run PowerShell from Bash.
