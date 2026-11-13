@@ -1,4 +1,4 @@
-// ClaudePusher 2.4 — unified Telegram + Voice interface for Claude Code.
+// ClaudePusher 2.5 — unified Telegram + Voice interface for Claude Code.
 //
 // Modules:
 //   Notify:   127.0.0.1 endpoint: a trusted local program raises an event code, a fixed line is injected
@@ -31,8 +31,8 @@ using System.Windows.Forms;
 using Microsoft.Win32;
 using MP3Sharp;
 
-[assembly: AssemblyVersion("2.4.0.0")]
-[assembly: AssemblyFileVersion("2.4.0.0")]
+[assembly: AssemblyVersion("2.5.0.0")]
+[assembly: AssemblyFileVersion("2.5.0.0")]
 [assembly: AssemblyProduct("ClaudePusher")]
 [assembly: AssemblyDescription("Telegram + Voice interface for Claude Code")]
 [assembly: AssemblyCopyright("(c) 2026 sensboston")]
@@ -2300,6 +2300,7 @@ static class ClaudePusher
                     ShowWindow(hwnd, SW_RESTORE);
                     SetForegroundWindow(hwnd);
                 };
+                item.Tag = hwnd;
                 menu.MenuItems.Add(item);
             }
         }
@@ -2358,6 +2359,119 @@ static class ClaudePusher
             tray.Visible = false;
             Application.Exit();
         }));
+    }
+
+    // The console title, which Claude Code keeps set to the session's topic.
+    static string WindowTitle(IntPtr hwnd)
+    {
+        var sb = new StringBuilder(512);
+        GetWindowText(hwnd, sb, sb.Capacity);
+        return sb.ToString().Trim();
+    }
+
+    // A small tooltip-like window next to the cursor while a window item is highlighted
+    // (the classic ContextMenu has no tooltips of its own).
+    class MenuTip : Form
+    {
+        const int MaxChars = 80;
+        static MenuTip instance;
+        string tipText = "";
+        static readonly Padding TextPadding = new Padding(5, 3, 5, 3);
+
+        MenuTip()
+        {
+            FormBorderStyle = FormBorderStyle.None;
+            ShowInTaskbar   = false;
+            StartPosition   = FormStartPosition.Manual;
+            BackColor       = SystemColors.Info;
+            Font            = SystemFonts.MenuFont;
+            SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer, true);
+        }
+
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            TextRenderer.DrawText(e.Graphics, tipText, Font,
+                new Point(TextPadding.Left, TextPadding.Top), SystemColors.InfoText);
+        }
+
+        protected override bool ShowWithoutActivation { get { return true; } }
+
+        protected override CreateParams CreateParams
+        {
+            get
+            {
+                var cp = base.CreateParams;
+                cp.ExStyle |= 0x00000080 /* WS_EX_TOOLWINDOW */ | 0x08000000 /* WS_EX_NOACTIVATE */ | 0x00000008 /* WS_EX_TOPMOST */;
+                cp.Style   |= 0x00800000; // WS_BORDER
+                return cp;
+            }
+        }
+
+        [DllImport("user32.dll")] static extern bool SetWindowPos(IntPtr h, IntPtr after, int x, int y, int cx, int cy, uint flags);
+        [DllImport("user32.dll")] static extern bool ShowWindow(IntPtr h, int cmd);
+        static readonly IntPtr HWND_TOPMOST = new IntPtr(-1);
+        const uint SWP_NOACTIVATE = 0x0010, SWP_SHOWWINDOW = 0x0040;
+        const int  SW_HIDE = 0;
+
+        // Called once on the UI thread before any menu opens: the handle exists from then on.
+        public static void Prepare()
+        {
+            if (instance != null && !instance.IsDisposed) return;
+            instance = new MenuTip();
+            var unused = instance.Handle;
+        }
+
+        public static void ShowFor(string text)
+        {
+            if (instance == null || instance.IsDisposed) return;
+            if (string.IsNullOrEmpty(text)) { HideTip(); return; }
+            if (text.Length > MaxChars) text = text.Substring(0, MaxChars - 3) + "...";
+            instance.tipText = text;
+            var size = TextRenderer.MeasureText(text, instance.Font);
+            var p = Cursor.Position;
+            SetWindowPos(instance.Handle, HWND_TOPMOST, p.X + 18, p.Y + 18,
+                size.Width + TextPadding.Horizontal + 2, size.Height + TextPadding.Vertical + 2,
+                SWP_NOACTIVATE | SWP_SHOWWINDOW);
+            instance.Invalidate();
+            instance.Update();
+        }
+
+        public static void HideTip()
+        {
+            if (instance != null && !instance.IsDisposed) ShowWindow(instance.Handle, SW_HIDE);
+            shownFor = IntPtr.Zero;
+        }
+
+        [StructLayout(LayoutKind.Sequential)] struct POINT { public int X, Y; }
+        [DllImport("user32.dll")] static extern int MenuItemFromPoint(IntPtr hWnd, IntPtr hMenu, POINT pt);
+
+        static System.Windows.Forms.Timer timer;
+        static IntPtr shownFor;
+
+        // Called when the tray menu opens: polls the item under the cursor until Stop.
+        public static void Start(ContextMenu menu)
+        {
+            Stop();
+            timer = new System.Windows.Forms.Timer { Interval = 150 };
+            timer.Tick += (s, e) =>
+            {
+                var c = Cursor.Position;
+                int index = MenuItemFromPoint(IntPtr.Zero, menu.Handle, new POINT { X = c.X, Y = c.Y });
+                IntPtr hwnd = index >= 0 && index < menu.MenuItems.Count && menu.MenuItems[index].Tag is IntPtr
+                    ? (IntPtr)menu.MenuItems[index].Tag : IntPtr.Zero;
+                if (hwnd == IntPtr.Zero) { HideTip(); return; }
+                if (hwnd == shownFor) return;
+                ShowFor(WindowTitle(hwnd));
+                shownFor = hwnd;
+            };
+            timer.Start();
+        }
+
+        public static void Stop()
+        {
+            if (timer != null) { timer.Stop(); timer.Dispose(); timer = null; }
+            HideTip();
+        }
     }
 
     #endregion
@@ -2452,6 +2566,7 @@ static class ClaudePusher
         uiForm.Load += (s, e) =>
         {
             uiCtx = uiForm;
+            MenuTip.Prepare();
 
             try { PurgeDeadTrayIcons(); } catch { }
 
@@ -2469,7 +2584,8 @@ static class ClaudePusher
                 tray.Icon = SystemIcons.Application;
 
             var menu = new ContextMenu();
-            menu.Popup += (ms, me) => RebuildTrayMenu(menu);
+            menu.Popup += (ms, me) => { RebuildTrayMenu(menu); MenuTip.Start(menu); };
+            menu.Collapse += (ms, me) => MenuTip.Stop();
             tray.ContextMenu  = menu;
             tray.DoubleClick += (ts, te) =>
             {
